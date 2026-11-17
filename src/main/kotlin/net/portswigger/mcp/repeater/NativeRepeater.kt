@@ -78,16 +78,6 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
             editorSelectors(requestOwner).singleOrNull() === views && !hasResponseOrInspector(requestOwner)) {
             "Cannot prove distinct Request and Response editor owners"
         }
-        val responseSelectors = allEditorSelectors(responseOwner)
-        require(responseSelectors.size <= 1 && responseSelectors.all { visibleWithin(it, selected.content) }) {
-            "Cannot bind an ambiguous or hidden Response editor selector"
-        }
-        val responseViews = responseSelectors.singleOrNull()
-        fun responseStateValid(): Boolean = if (responseViews != null) {
-            allEditorSelectors(responseOwner).singleOrNull() === responseViews && visibleWithin(responseViews, selected.content)
-        } else {
-            allEditorSelectors(responseOwner).isEmpty()
-        }
         // Burp may use null-page tabs only as selectors. Bind the Hex table through
         // a separately captured narrow Request region, never the whole leaf tab.
         val requestRegion = if (view == null && viewName == "Hex") requestOwner.also {
@@ -96,7 +86,6 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         val hexTable = requestRegion?.let { visibleTables(it).single() }
         val ownerPaths = listOf(requestAnchorPath, responseAnchorPath, pathTo(requestOwner, selected.content),
             pathTo(responseOwner, selected.content), pathTo(views, requestOwner)) +
-            (if (responseViews != null) listOf(pathTo(responseViews, responseOwner)) else emptyList()) +
             if (hexTable != null) listOf(pathTo(hexTable, requestOwner)) else emptyList()
         fun boundaryValid(): Boolean = ownerPaths.all(::pathValid) &&
             requestOwner.parent === separator && responseOwner.parent === separator &&
@@ -104,17 +93,49 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
             visibleWithin(labels.single(), selected.content) && visibleWithin(responseLabels.single(), selected.content) &&
             components(selected.content).filterIsInstance<JLabel>().filter { it.text == "Request" }.singleOrNull() === labels.single() &&
             components(selected.content).filterIsInstance<JLabel>().filter { it.text == "Response" }.singleOrNull() === responseLabels.single() &&
-            editorSelectors(requestOwner).singleOrNull() === views && responseStateValid() &&
+            editorSelectors(requestOwner).singleOrNull() === views &&
             !hasResponseOrInspector(requestOwner)
         fun regionValid(): Boolean = requestRegion != null && boundaryValid()
         fun tableValid() = requestRegion != null && hexTable != null && regionValid() &&
             visibleTables(requestRegion).singleOrNull() === hexTable
+        val actionBar = M0ActionBar.capture(selected.content, requestOwner, responseOwner)
         M0ContextTarget(tabId, viewName, canMutateNow = {
             check(SwingUtilities.isEventDispatchThread())
             verifySelection(selected.identity)
+            boundaryValid() && actionBar?.ready() == true
+        }, matchesNativeService = { host, port, tls ->
+            actionBar?.matchesService(host, port, tls) == true
+        }, describeMutationReadiness = {
+            check(SwingUtilities.isEventDispatchThread())
+            val tabValid = try { verifySelection(selected.identity); true } catch (_: Exception) { false }
             val cancel = components(selected.content).filterIsInstance<AbstractButton>()
                 .filter { visibleWithin(it, selected.content) && it.text == "Cancel" }.toList()
-            cancel.size == 1 && !cancel.single().isEnabled
+            val send = components(selected.content).filter { component ->
+                visibleWithin(component, selected.content) && ((component is AbstractButton && component.text == "Send") ||
+                    (component is JLabel && component.text == "Send"))
+            }.toList()
+            val targets = components(selected.content).filterIsInstance<JLabel>()
+                .filter { visibleWithin(it, selected.content) && it.text?.startsWith("Target: ") == true }.toList()
+            val bar = if (send.size == 1 && targets.size == 1) {
+                val sendPath = pathTo(send.single(), selected.content)
+                val targetPath = pathTo(targets.single(), selected.content)
+                sendPath.firstOrNull { candidate -> targetPath.any { it === candidate } }
+            } else null
+            val barDisjoint = bar != null && bar !== selected.content && bar !== requestOwner && bar !== responseOwner &&
+                !SwingUtilities.isDescendingFrom(requestOwner, bar) && !SwingUtilities.isDescendingFrom(responseOwner, bar) &&
+                !SwingUtilities.isDescendingFrom(bar, requestOwner) && !SwingUtilities.isDescendingFrom(bar, responseOwner)
+            M0NativeReadiness(tabValid, cancel.size, cancel.take(8).map { it.isEnabled }, send.size, targets.size,
+                cancel.take(8).map { button ->
+                    M0CancelControlDiagnostic(button.javaClass.name.take(160), button.isEnabled,
+                        button.isShowing, button.isDisplayable, button.width > 0 && button.height > 0,
+                        SwingUtilities.isDescendingFrom(button, requestOwner), SwingUtilities.isDescendingFrom(button, responseOwner),
+                        bar?.let { button === it || SwingUtilities.isDescendingFrom(button, it) },
+                        generateSequence(button.parent) { it.parent }.take(8).map { it.javaClass.name.take(160) }.toList())
+                }, bar?.javaClass?.name?.take(160), barDisjoint,
+                bar?.let { owner -> cancel.count { it === owner || SwingUtilities.isDescendingFrom(it, owner) } },
+                actionBar != null, actionBar?.ready() == true, send.count { it.isShowing }, targets.count { it.isShowing },
+                send.take(8).map { it.isEnabled }, send.take(8).map { it.isShowing },
+                send.take(8).map { it.width > 0 && it.height > 0 })
         }, describeSource = { source ->
             check(SwingUtilities.isEventDispatchThread())
             var diagnosticException = false
@@ -149,8 +170,7 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
                 requestRegion?.let { checkState { source === it || SwingUtilities.isDescendingFrom(source, it) } },
                 requestRegion?.let { visibleTables(it).size }, requestRegion?.let(::hasResponseOrInspector),
                 checkState(::boundaryValid), checkState { !SwingUtilities.isDescendingFrom(responseOwner, requestOwner) },
-                checkState { source === responseOwner || SwingUtilities.isDescendingFrom(source, responseOwner) },
-                if (responseViews == null) "selector_absent" else "captured_response_selector")
+                checkState { source === responseOwner || SwingUtilities.isDescendingFrom(source, responseOwner) })
         }) { source ->
             if (!SwingUtilities.isEventDispatchThread()) false
             else try {

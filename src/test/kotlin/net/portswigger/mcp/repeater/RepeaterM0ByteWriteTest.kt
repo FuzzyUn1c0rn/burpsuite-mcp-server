@@ -35,6 +35,7 @@ class RepeaterM0ByteWriteTest {
         val source = JTable()
         var owned = true
         var idle = true
+        var nativeServiceValid = true
         var permitted = true
         var setters = 0
         var setterHook: () -> Unit = {}
@@ -45,7 +46,9 @@ class RepeaterM0ByteWriteTest {
         }
         val editor = mockk<MessageEditorHttpRequestResponse>(relaxed = true)
         val event = mockk<ContextMenuEvent>(relaxed = true)
-        val target = M0ContextTarget("tab", "Hex", canMutateNow = { idle }) { owned && it === source }
+        val target = M0ContextTarget("tab", "Hex", canMutateNow = { idle }, matchesNativeService = { host, port, tls ->
+            nativeServiceValid && host == "example.test" && port == 443 && tls
+        }) { owned && it === source }
         init {
             every { event.isFromTool(ToolType.REPEATER) } returns true
             every { event.invocationType() } returns InvocationType.MESSAGE_EDITOR_REQUEST
@@ -96,7 +99,7 @@ class RepeaterM0ByteWriteTest {
     }
 
     @Test fun `stale full bytes service or model version refuse before setter`() = runBlocking {
-        for (scenario in listOf("hash", "host", "port", "tls", "version", "owned", "busy", "permission", "response", "viewer")) {
+        for (scenario in listOf("hash", "host", "port", "tls", "version", "owned", "busy", "native_service", "permission", "response", "viewer")) {
             val f = Fixture()
             val plan = f.plan(if (scenario == "hash") "0".repeat(64) else m0ByteHash(f.oldBytes))
             when (scenario) {
@@ -106,6 +109,7 @@ class RepeaterM0ByteWriteTest {
                 "version" -> every { f.old.httpVersion() } returns "HTTP/1.1"
                 "owned" -> f.owned = false
                 "busy" -> f.idle = false
+                "native_service" -> f.nativeServiceValid = false
                 "permission" -> f.permitted = false
                 "response" -> every { f.editor.selectionContext() } returns MessageEditorHttpRequestResponse.SelectionContext.RESPONSE
                 "viewer" -> every { f.event.invocationType() } returns InvocationType.MESSAGE_VIEWER_REQUEST
@@ -120,7 +124,7 @@ class RepeaterM0ByteWriteTest {
     }
 
     @Test fun `constructor discrepancies and changes at final boundary refuse before setter`() = runBlocking {
-        for (scenario in listOf("bytes", "service", "version", "old_bytes_changed", "permission", "identity", "busy")) {
+        for (scenario in listOf("bytes", "service", "version", "old_bytes_changed", "permission", "identity", "busy", "native_service")) {
             val f = Fixture()
             f.builder = { _, _ ->
                 when (scenario) {
@@ -128,6 +132,7 @@ class RepeaterM0ByteWriteTest {
                     "permission" -> f.permitted = false
                     "identity" -> f.owned = false
                     "busy" -> f.idle = false
+                    "native_service" -> f.nativeServiceValid = false
                 }
                 when (scenario) {
                     "bytes" -> f.model(f.newBytes + 'x'.code.toByte())
@@ -274,5 +279,74 @@ class RepeaterM0ByteWriteTest {
         assertFalse(Json.encodeToString(outcome).contains("PRIVATE_CLEANUP_FAILURE"))
         SwingUtilities.invokeAndWait { provider.provideMenuItems(f.event) }
         assertEquals(1, f.setters)
+    }
+
+    @Test fun `registration failure after admitted callback preserves possible mutation and closes provider`() = runBlocking {
+        val f = Fixture()
+        every { f.event.inputEvent() } returns MouseEvent(f.source, MouseEvent.MOUSE_RELEASED, Long.MAX_VALUE,
+            0, 1, 1, 1, true, MouseEvent.BUTTON3)
+        val api = mockk<MontoyaApi>(relaxed = true)
+        val native = mockk<NativeRepeater>()
+        var provider: ContextMenuItemsProvider? = null
+        coEvery { native.modelContextTarget("tab") } returns f.target
+        every { api.userInterface().registerContextMenuItemsProvider(any()) } answers {
+            provider = firstArg()
+            SwingUtilities.invokeAndWait { checkNotNull(provider).provideMenuItems(f.event) }
+            error("PRIVATE_REGISTRATION_FAILURE")
+        }
+        val outcome = observeM0ContextModel(api, native, "tab", f.plan(), { f.permitted }, f.builder)
+        assertEquals("mutation_unconfirmed", outcome.status)
+        assertTrue(outcome.modelWriteAttempted && outcome.mutationMayHaveOccurred)
+        assertFalse(outcome.modelWriteConfirmed)
+        assertEquals("M0_CONTEXT_REGISTRATION_UNCONFIRMED", outcome.reason)
+        assertFalse(Json.encodeToString(outcome).contains("PRIVATE_REGISTRATION_FAILURE"))
+        SwingUtilities.invokeAndWait { checkNotNull(provider).provideMenuItems(f.event) }
+        assertEquals(1, f.setters)
+    }
+
+    @Test fun `Raw and Pretty writer targets are rejected before reading or setting model`() = runBlocking {
+        for (view in listOf("Raw", "Pretty")) {
+            val f = Fixture()
+            val target = M0ContextTarget("tab", view, canMutateNow = { true }) { it === f.source }
+            val probe = RepeaterM0ContextProbe(target, 1000, f.plan(), { true }, f.builder)
+            f.invoke(probe)
+            val outcome = probe.result.await()
+            assertEquals("M0_BYTE_WRITER_REQUIRES_HEX", outcome.reason)
+            assertFalse(outcome.modelWriteAttempted)
+            verify(exactly = 0) { f.editor.requestResponse() }
+            assertEquals(0, f.setters)
+        }
+    }
+
+    @Test fun `cancellation during blocked registration closes admission before a late callback`() = runBlocking {
+        val f = Fixture()
+        every { f.event.inputEvent() } returns MouseEvent(f.source, MouseEvent.MOUSE_RELEASED, Long.MAX_VALUE,
+            0, 1, 1, 1, true, MouseEvent.BUTTON3)
+        val api = mockk<MontoyaApi>(relaxed = true)
+        val native = mockk<NativeRepeater>()
+        val registration = mockk<Registration>(relaxed = true)
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        var provider: ContextMenuItemsProvider? = null
+        coEvery { native.modelContextTarget("tab") } returns f.target
+        every { api.userInterface().registerContextMenuItemsProvider(any()) } answers {
+            provider = firstArg()
+            entered.countDown()
+            check(release.await(5, TimeUnit.SECONDS))
+            registration
+        }
+        val call = async(Dispatchers.Default) {
+            observeM0ContextModel(api, native, "tab", f.plan(), { f.permitted }, f.builder)
+        }
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            call.cancel()
+            SwingUtilities.invokeAndWait { checkNotNull(provider).provideMenuItems(f.event) }
+            assertEquals(0, f.setters)
+            verify(exactly = 0) { f.editor.requestResponse() }
+        } finally { release.countDown() }
+        call.join()
+        assertTrue(call.isCancelled)
+        verify(exactly = 1) { registration.deregister() }
     }
 }

@@ -57,7 +57,7 @@ class NativeRepeaterTest {
     @Test
     fun `null-page Hex refuses multiple tables Response or Inspector regions before arming`() = runBlocking {
         for (scenario in listOf("multiple", "response", "inspector", "missing_response", "hidden_response", "duplicate_response", "hidden_table",
-            "missing_request", "hidden_request", "duplicate_request", "response_selector_missing", "response_selector_hidden")) {
+            "missing_request", "hidden_request", "duplicate_request")) {
             val fixture = NullHexFixture().apply { prepare() }
             when (scenario) {
                 "multiple" -> fixture.tableHolder.add(JTable(1, 1))
@@ -70,19 +70,9 @@ class NativeRepeaterTest {
                 "missing_request" -> fixture.header.components.filterIsInstance<JLabel>().single().text = "Other"
                 "hidden_request" -> fixture.header.components.filterIsInstance<JLabel>().single().isVisible = false
                 "duplicate_request" -> fixture.panel.add(JLabel("Request"))
-                "response_selector_missing" -> fixture.responseRegion.remove(fixture.responseSelector)
-                "response_selector_hidden" -> fixture.responseSelector.isVisible = false
             }
             val expectedFailure = if (scenario in setOf("multiple", "hidden_table"))
                 IllegalStateException::class.java else IllegalArgumentException::class.java
-            if (scenario == "response_selector_missing") {
-                val target = fixture.f.native.modelContextTarget(fixture.id)
-                SwingUtilities.invokeAndWait {
-                    assertTrue(target.ownsSource(fixture.table))
-                    assertEquals("selector_absent", checkNotNull(target.describeSource).invoke(fixture.table).responseOwnerState)
-                }
-                continue
-            }
             assertThrows(expectedFailure, { runBlocking {
                 fixture.f.native.modelContextTarget(fixture.id)
             } }, scenario)
@@ -91,8 +81,8 @@ class NativeRepeaterTest {
     }
 
     @Test
-    fun `selector-absent Response owner cannot learn a later selector or changed owner`() = runBlocking {
-        for (scenario in listOf("materialized", "hidden_selector", "response_replaced", "response_hidden")) {
+    fun `Response selector internals do not change ownership of the independently captured Request source`() = runBlocking {
+        for (scenario in listOf("materialized", "hidden_selector", "multiple_selectors", "replacement", "none")) {
             val fixture = NullHexFixture().apply { prepare() }
             fixture.responseRegion.remove(fixture.responseSelector)
             val target = fixture.f.native.modelContextTarget(fixture.id)
@@ -104,15 +94,38 @@ class NativeRepeaterTest {
                         fixture.responseSelector.isVisible = false
                         fixture.responseRegion.add(fixture.responseSelector)
                     }
-                    "response_replaced" -> {
-                        fixture.panel.remove(fixture.responseRegion)
-                        fixture.panel.add(JPanel().apply { add(JLabel("Response")) })
+                    "multiple_selectors" -> {
+                        fixture.responseRegion.add(fixture.responseSelector)
+                        fixture.responseRegion.add(JTabbedPane().apply {
+                            addTab("Pretty", null); addTab("Raw", null); addTab("Hex", null); isVisible = false
+                        })
                     }
-                    "response_hidden" -> fixture.responseRegion.isVisible = false
+                    "replacement" -> fixture.responseRegion.add(JTabbedPane().apply {
+                        addTab("Pretty", null); addTab("Raw", null); addTab("Hex", null)
+                    })
                 }
-                assertFalse(target.ownsSource(fixture.table), scenario)
+                assertTrue(target.ownsSource(fixture.table), scenario)
+                assertFalse(target.ownsSource(fixture.responseTable), scenario)
             }
         }
+    }
+
+    @Test
+    fun `idle diagnostics expose duplicate Cancel controls but do not select one or claim idle`() = runBlocking {
+        val fixture = NullHexFixture().apply { prepare() }
+        fixture.responseRegion.add(JButton("Cancel").apply { isEnabled = false; name = "PRIVATE_NAME" })
+        val target = fixture.f.native.modelContextTarget(fixture.id)
+        SwingUtilities.invokeAndWait {
+            assertTrue(target.ownsSource(fixture.table))
+            assertFalse(target.canMutateNow())
+            val readiness = checkNotNull(target.describeMutationReadiness).invoke()
+            assertEquals(2, readiness.visibleCancelControlCount)
+            assertEquals(listOf(false, false), readiness.cancelEnabledSamples)
+            assertTrue(readiness.cancelSamples.any { it.withinResponseOwner })
+            assertTrue(readiness.cancelSamples.all { it.ancestorClasses.size <= 8 })
+            assertFalse(readiness.toString().contains("PRIVATE_NAME"))
+        }
+        assertEquals(0, fixture.f.sends)
     }
 
     @Test

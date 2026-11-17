@@ -10,6 +10,9 @@ import burp.api.montoya.ui.contextmenu.InvocationType
 import burp.api.montoya.ui.contextmenu.MessageEditorHttpRequestResponse.SelectionContext
 import burp.api.montoya.ui.contextmenu.MessageEditorHttpRequestResponse
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
 import java.awt.Component
@@ -22,6 +25,8 @@ internal class M0ContextTarget(
     val tabId: String, val view: String,
     val describeSource: ((Component) -> M0ContextOwnership)? = null,
     val canMutateNow: () -> Boolean = { false },
+    val describeMutationReadiness: (() -> M0NativeReadiness)? = null,
+    val matchesNativeService: (String, Int, Boolean) -> Boolean = { _, _, _ -> true },
     val ownsSource: (Component) -> Boolean
 )
 
@@ -45,13 +50,14 @@ internal class RepeaterM0ContextProbe(
         var phase = "read"
         var observedInvocation: String? = null
         var constructorDiagnostics: M0ConstructorObservation? = null
+        var mutationGuards: M0MutationGuards? = null
         fun reject(reason: String, ownership: M0ContextOwnership? = null) {
             if (target === current) {
                 val attempted = admission.get() == Admission.MUTATION_STARTED
                 result.complete(M0ContextModelObservation(if (attempted) "mutation_unconfirmed" else "rejected", reason,
                     current.tabId, current.view, modelWriteAttempted = attempted,
                     ownership = ownership, observedInvocationType = observedInvocation, mutationMayHaveOccurred = attempted,
-                    constructorDiagnostics = constructorDiagnostics))
+                    constructorDiagnostics = constructorDiagnostics, mutationGuards = mutationGuards))
             }
         }
         fun closed() = target !== current || result.isCompleted
@@ -93,16 +99,27 @@ internal class RepeaterM0ContextProbe(
                 return emptyList()
             }
             if (closed()) return emptyList()
+            if (plan != null && current.view != "Hex") { reject("M0_BYTE_WRITER_REQUIRES_HEX"); return emptyList() }
             if (!permissionStillValid()) { reject("PERMISSION_CHANGED_BEFORE_MODEL_READ"); return emptyList() }
             var snapshot = copyM0EditorModel(editor, ::closed) ?: return emptyList()
+            fun mutationReady(stage: String): Boolean {
+                val owned = current.ownsSource(source)
+                val idle = if (owned) try { current.canMutateNow() &&
+                    current.matchesNativeService(snapshot.host, snapshot.port, snapshot.tls) } catch (_: Exception) { null } else null
+                val permitted = permissionStillValid()
+                if (owned && idle == true && permitted) return true
+                val detail = try { current.describeMutationReadiness?.invoke() } catch (_: Exception) { null }
+                mutationGuards = M0MutationGuards(stage, owned, idle, permitted, detail)
+                val ownership = if (!owned) try { current.describeSource?.invoke(source) } catch (_: Exception) { null } else null
+                reject(if (stage == "before_constructor") "IDENTITY_CHANGED_OR_NATIVE_BUSY" else "FINAL_IDENTITY_BUSY_OR_PERMISSION_CHANGED", ownership)
+                return false
+            }
             if (plan != null) {
                 if (!permissionStillValid()) { reject("PERMISSION_CHANGED_BEFORE_MUTATION"); return emptyList() }
                 if (!plan.matches(snapshot.bytes, snapshot.host, snapshot.port, snapshot.tls, snapshot.version)) {
                     reject("STALE_MODEL_OR_SERVICE_PROTOCOL_CHANGED"); return emptyList()
                 }
-                if (!current.ownsSource(source) || !current.canMutateNow()) {
-                    reject("IDENTITY_CHANGED_OR_NATIVE_BUSY"); return emptyList()
-                }
+                if (!mutationReady("before_constructor")) return emptyList()
                 val replacementBytes = plan.replacementCopy()
                 val replacement = constructRequest(snapshot.service, replacementBytes)
                 val constructed = copyM0RequestModel(replacement, ::closed) ?: return emptyList()
@@ -116,9 +133,7 @@ internal class RepeaterM0ContextProbe(
                 if (!currentSnapshot.bytes.contentEquals(snapshot.bytes) || !currentSnapshot.sameServiceProtocol(snapshot)) {
                     reject("MODEL_CHANGED_BEFORE_MUTATION"); return emptyList()
                 }
-                if (!current.ownsSource(source) || !current.canMutateNow() || !permissionStillValid()) {
-                    reject("FINAL_IDENTITY_BUSY_OR_PERMISSION_CHANGED"); return emptyList()
-                }
+                if (!mutationReady("before_setter")) return emptyList()
                 if (closed() || !admission.compareAndSet(Admission.OPEN, Admission.MUTATION_STARTED)) return emptyList()
                 // The attempt is recorded BEFORE the void API call. Closing cannot undo it.
                 phase = "setter"
@@ -164,6 +179,14 @@ internal class RepeaterM0ContextProbe(
         val attempted = admission.get() == Admission.MUTATION_STARTED
         return M0ContextModelObservation(if (attempted) "mutation_unconfirmed" else "not_observed",
             if (attempted) "DEADLINE_AFTER_MUTATION_ADMISSION" else "NO_CONTEXT_EVENT_WITHIN_30000MS", tabId, view,
+            modelWriteAttempted = attempted, mutationMayHaveOccurred = attempted)
+    }
+
+    fun closeForRegistrationFailure(tabId: String, view: String): M0ContextModelObservation {
+        close()
+        val attempted = admission.get() == Admission.MUTATION_STARTED
+        return M0ContextModelObservation(if (attempted) "mutation_unconfirmed" else "rejected",
+            "M0_CONTEXT_REGISTRATION_UNCONFIRMED", tabId, view,
             modelWriteAttempted = attempted, mutationMayHaveOccurred = attempted)
     }
 
@@ -219,21 +242,32 @@ internal suspend fun observeM0ContextModel(api: MontoyaApi, native: NativeRepeat
     writePlan: M0ByteWritePlan? = null, permissionStillValid: () -> Boolean = { true },
     constructRequest: (HttpService, ByteArray) -> HttpRequest = ::constructM0ByteRequest): M0ContextModelObservation {
     val target = native.modelContextTarget(tabId)
+    require(writePlan == null || target.view == "Hex") { "M0_BYTE_WRITER_REQUIRES_HEX" }
     val probe = RepeaterM0ContextProbe(target, writePlan = writePlan, permissionStillValid = permissionStillValid,
         constructRequest = constructRequest)
-    val registration = try {
-        api.userInterface().registerContextMenuItemsProvider(probe)
-    } catch (_: Exception) {
-        probe.close()
-        error("M0_CONTEXT_REGISTRATION_UNAVAILABLE")
-    }
+    val callContext = currentCoroutineContext()
+    // This child has no running body/children, so parent cancellation completes it
+    // immediately even if the caller is blocked inside external registration.
+    val cancellationLease = Job(callContext[Job])
+    val cancelHandler = cancellationLease.invokeOnCompletion { cause -> if (cause != null) probe.close() }
+    var registration: burp.api.montoya.core.Registration? = null
     var cleanupFailed = false
     val observation = try {
+        callContext.ensureActive()
+        try {
+            registration = api.userInterface().registerContextMenuItemsProvider(probe)
+        } catch (_: Exception) {
+            callContext.ensureActive()
+            return probe.closeForRegistrationFailure(tabId, target.view)
+        }
+        callContext.ensureActive()
         withTimeoutOrNull(30_000) { probe.result.await() }
             ?: probe.closeForTimeout(tabId, target.view)
     } finally {
         probe.close()
-        try { registration.deregister() } catch (_: Exception) { cleanupFailed = true }
+        cancelHandler.dispose()
+        cancellationLease.complete()
+        try { registration?.deregister() } catch (_: Exception) { cleanupFailed = true }
     }
     return if (cleanupFailed) observation.copy(
         status = if (observation.modelWriteAttempted) "mutation_unconfirmed" else "rejected",
@@ -257,7 +291,34 @@ internal data class M0ContextModelObservation(
     val mutationMayHaveOccurred: Boolean = false, val modelWriteConfirmed: Boolean = false,
     val configuredProtocolVerified: Boolean = false,
     val byteInputContract: String = "M0 model bytes only; final editor_text semantics unassigned",
-    val constructorDiagnostics: M0ConstructorObservation? = null
+    val constructorDiagnostics: M0ConstructorObservation? = null,
+    val mutationGuards: M0MutationGuards? = null
+)
+
+@Serializable
+internal data class M0NativeReadiness(
+    val nativeTabPathIdentityValid: Boolean, val visibleCancelControlCount: Int,
+    val cancelEnabledSamples: List<Boolean>, val visibleSendControlCount: Int,
+    val visibleTargetLabelCount: Int, val cancelSamples: List<M0CancelControlDiagnostic> = emptyList(),
+    val actionBarCandidateClass: String? = null, val actionBarCandidateDisjointFromEditors: Boolean = false,
+    val actionBarCandidateCancelCount: Int? = null,
+    val capturedActionBarPresent: Boolean = false, val capturedActionBarReady: Boolean = false,
+    val effectiveShowingSendCount: Int = 0, val effectiveShowingTargetCount: Int = 0,
+    val sendEnabledSamples: List<Boolean> = emptyList(), val sendShowingSamples: List<Boolean> = emptyList(),
+    val sendPositiveSizeSamples: List<Boolean> = emptyList()
+)
+
+@Serializable
+internal data class M0CancelControlDiagnostic(
+    val componentClass: String, val enabled: Boolean, val showing: Boolean, val displayable: Boolean,
+    val positiveSize: Boolean, val withinRequestOwner: Boolean, val withinResponseOwner: Boolean,
+    val withinActionBarCandidate: Boolean?, val ancestorClasses: List<String>
+)
+
+@Serializable
+internal data class M0MutationGuards(
+    val stage: String, val ownershipValid: Boolean, val nativeIdleVerified: Boolean?,
+    val permissionValid: Boolean, val nativeReadiness: M0NativeReadiness?
 )
 
 @Serializable
@@ -281,6 +342,5 @@ internal data class M0ContextOwnership(
     val eventSourceWithinCapturedHexTable: Boolean? = null, val eventSourceWithinRequestRegion: Boolean? = null,
     val requestRegionVisibleTableCount: Int? = null, val requestRegionHasResponseOrInspector: Boolean? = null,
     val requestResponseBoundaryValid: Boolean? = null, val responseOwnerOutsideRequest: Boolean? = null,
-    val eventSourceWithinResponseOwner: Boolean? = null,
-    val responseOwnerState: String? = null
+    val eventSourceWithinResponseOwner: Boolean? = null
 )
