@@ -27,6 +27,36 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
     private val ids = WeakHashMap<Component, String>() // Accessed only on the event dispatch thread.
     private val paths = mutableMapOf<String, List<WeakStep>>()
 
+    /** Read-only M0 context experiment: never switches Pretty/Raw/Hex. */
+    suspend fun modelContextTarget(tabId: String): M0ContextTarget = withContext(Dispatchers.Swing) {
+        val selected = select(tabId)
+        val labels = components(selected.content).filterIsInstance<JLabel>()
+            .filter { visibleWithin(it, selected.content) && it.text == "Request" }.toList()
+        require(labels.size == 1) { "Cannot uniquely identify the native request editor label" }
+        val candidates = generateSequence(labels.single().parent) { if (it === selected.content) null else it.parent }
+            .map { ancestor -> components(ancestor).filterIsInstance<JTabbedPane>()
+                .filter { pane -> visibleWithin(pane, selected.content) &&
+                    (0 until pane.tabCount).map(pane::getTitleAt).containsAll(listOf("Pretty", "Raw", "Hex")) }
+                .toList() }
+            .firstOrNull { it.size == 1 } ?: error("Cannot uniquely bind a native request view")
+        val views = candidates.single()
+        val viewIndex = views.selectedIndex
+        require(viewIndex >= 0) { "No native request editor view selected" }
+        val viewName = views.getTitleAt(viewIndex)
+        require(viewName in setOf("Pretty", "Raw", "Hex")) { "Unsupported native request view" }
+        val view = views.getComponentAt(viewIndex)
+        M0ContextTarget(tabId, viewName) { source ->
+            if (!SwingUtilities.isEventDispatchThread()) false
+            else try {
+                verifySelection(selected.identity)
+                views.selectedIndex == viewIndex && views.getComponentAt(viewIndex) === view &&
+                    views.getTitleAt(viewIndex) == viewName &&
+                    SwingUtilities.isDescendingFrom(views, selected.content) &&
+                    (source === view || SwingUtilities.isDescendingFrom(source, view))
+            } catch (_: Exception) { false }
+        }
+    }
+
     /** M0 investigation only: widget mutation is NOT yet a proven native-model edit. */
     suspend fun investigateEdit(tabId: String, expectedFingerprint: String, request: String): RepeaterSnapshot =
         withContext(Dispatchers.Swing) {

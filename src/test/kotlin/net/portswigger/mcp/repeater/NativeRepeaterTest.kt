@@ -8,6 +8,34 @@ import javax.swing.*
 
 class NativeRepeaterTest {
     @Test
+    fun `model context target binds exact request view and never response or switched views`() = runBlocking {
+        val f = Fixture()
+        f.add("target")
+        val entry = f.native.tabs().single()
+        val requestSource = JTextArea()
+        val responseSource = JTextArea()
+        val views = JTabbedPane().apply {
+            addTab("Pretty", JPanel())
+            addTab("Raw", JPanel())
+            addTab("Hex", requestSource)
+            selectedIndex = 2
+        }
+        val panel = f.tabs.getComponentAt(0) as JPanel
+        panel.add(JPanel(BorderLayout()).apply { add(JLabel("Request"), BorderLayout.NORTH); add(views) })
+        panel.add(JPanel(BorderLayout()).apply { add(JLabel("Response"), BorderLayout.NORTH); add(responseSource) })
+        val target = f.native.modelContextTarget(entry.tabId)
+        assertEquals("Hex", target.view)
+        SwingUtilities.invokeAndWait {
+            assertTrue(target.ownsSource(requestSource))
+            assertFalse(target.ownsSource(responseSource))
+            assertEquals(2, views.selectedIndex)
+            views.selectedIndex = 1
+            assertFalse(target.ownsSource(requestSource))
+        }
+        assertEquals(0, f.sends)
+    }
+
+    @Test
     fun `suite and group activation callbacks cannot replace captured target identity`() = runBlocking {
         for (boundary in listOf("suite", "group")) {
             for (mutation in listOf("remove", "header", "content", "reparent")) {

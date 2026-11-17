@@ -37,19 +37,23 @@ internal fun Server.registerNativeRepeaterTools(api: MontoyaApi, config: McpConf
 
     if (investigationMode) {
     val probeJson = Json { encodeDefaults = true }
-    mcpTool<RepeaterM0Probe>("M0 INVESTIGATION ONLY, not a supported MVP operation. Requires acknowledgement=M0_UNVERIFIED_NATIVE_MODEL. Inspect returns bounded read-only control metadata with all effective settings explicitly unverified. edit performs an experimental guarded text-widget update; fixture/native Send evidence is required to establish whether it updates Burp's model. Never sends or changes settings. Use only synthetic requests in the disposable M0 project.") {
+    mcpTool<RepeaterM0Probe>("M0 INVESTIGATION ONLY, not a supported MVP operation. Requires acknowledgement=M0_UNVERIFIED_NATIVE_MODEL. inspect returns bounded read-only control metadata with effective settings unverified. edit is an experimental guarded text-widget update requiring native Send proof. model_read waits up to 30s for a new native request-editor context menu on this exact tab, extracts public model byte metadata only, then deregisters; trigger the native context menu during the wait. It does not switch editor view or retain the model handle. Never sends or changes settings. Synthetic disposable M0 project only.") {
         require(acknowledgement == "M0_UNVERIFIED_NATIVE_MODEL") { "Explicit M0 investigation acknowledgement required" }
-        require(action in setOf("inspect", "edit")) { "action must be inspect or edit" }
+        require(action in setOf("inspect", "edit", "model_read")) { "action must be inspect, edit or model_read" }
         require((action == "edit") == (requestContent != null && expectedFingerprint != null)) {
             "edit requires requestContent and expectedFingerprint; inspect accepts neither"
         }
-        if (action == "inspect") require(requestContent == null && expectedFingerprint == null)
+        if (action != "edit") require(requestContent == null && expectedFingerprint == null)
         checkReadPermission()
         operations.withLock {
             if (action == "edit") {
                 val snapshot = native.investigateEdit(tabId, checkNotNull(expectedFingerprint), checkNotNull(requestContent))
                 probeJson.encodeToString(RepeaterM0EditResult(snapshot.tabId, snapshot.fingerprint,
                     snapshot.targetHostname, snapshot.targetPort, snapshot.usesHttps))
+            } else if (action == "model_read") {
+                val observation = observeM0ContextModel(api, native, tabId)
+                checkReadPermission()
+                probeJson.encodeToString(observation)
             } else {
                 probeJson.encodeToString(RepeaterM0Inspection(native.investigateControls(tabId)))
             }
