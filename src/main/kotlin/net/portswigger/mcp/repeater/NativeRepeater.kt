@@ -151,7 +151,7 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
     private data class SelectionIdentity(val pane: JTabbedPane, val header: Component, val content: Component)
     private data class Selected(val description: RepeaterTab, val content: Component, val identity: List<SelectionIdentity>)
 
-    private fun verifySelection(identity: List<SelectionIdentity>) {
+    private fun verifySelection(identity: List<SelectionIdentity>, requireSelected: Boolean = true) {
         val frame = suiteFrame()
         identity.forEach { selected ->
             val pane = selected.pane
@@ -159,9 +159,14 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
                 "Repeater tab detached or closed during selection; no neighboring tab may be used."
             }
             val index = (0 until pane.tabCount).singleOrNull { pane.getTabComponentAt(it) === selected.header }
-            require(index != null && pane.selectedIndex == index &&
+            require(index != null && (!requireSelected || pane.selectedIndex == index) &&
                 pane.getComponentAt(index) === selected.content) {
                 "Repeater tab identity changed during selection; no neighboring tab may be used."
+            }
+        }
+        identity.zipWithNext().forEach { (parent, child) ->
+            require(child.pane === parent.content || SwingUtilities.isDescendingFrom(child.pane, parent.content)) {
+                "Repeater group ancestry changed during selection; no neighboring tab may be used."
             }
         }
     }
@@ -207,11 +212,11 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         val path = paths[tabId]
             ?: error("Repeater tab ID is unknown or closed. List tabs again; no request was sent.")
         val frame = suiteFrame()
-        var content: Component? = null
         val names = mutableListOf<String>()
         var flatGroups = false
-        val identity = mutableListOf<SelectionIdentity>()
-        for (step in path) {
+        // Capture the entire path before ANY selection can invoke application callbacks,
+        // including switching the main Burp tool or an ancestor group.
+        val identity = path.map { step ->
             val pane = step.pane.get()
                 ?: error("Repeater tab is closed. List tabs again; no request was sent.")
             val header = step.header.get()
@@ -219,14 +224,6 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
             require(pane === frame || SwingUtilities.isDescendingFrom(pane, frame)) {
                 "Repeater tab is detached or closed. List tabs again; no request was sent."
             }
-            // A client can call this while another main Burp tool is selected.
-            generateSequence(pane.parent) { it.parent }.filterIsInstance<JTabbedPane>().toList().asReversed()
-                .forEach { owner ->
-                    (0 until owner.tabCount).singleOrNull {
-                        val page = owner.getComponentAt(it)
-                        page === pane || SwingUtilities.isDescendingFrom(pane, page)
-                    }?.let { owner.selectedIndex = it }
-                }
             val index = (0 until pane.tabCount).singleOrNull {
                 pane.getTabComponentAt(it) === header
             } ?: error("Repeater tab changed while selecting it; no request was sent.")
@@ -234,19 +231,35 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
             require(expectedContent != null) {
                 "This ID identifies a group header. List tabs and choose an ID with kind=request."
             }
+            SelectionIdentity(pane, header, expectedContent)
+        }
+        verifySelection(identity, requireSelected = false)
+        identity.forEachIndexed { stepIndex, selected ->
+            val pane = selected.pane
+            val header = selected.header
+            // A client can call this while another main Burp tool is selected.
+            generateSequence(pane.parent) { it.parent }.filterIsInstance<JTabbedPane>().toList().asReversed()
+                .forEach { owner ->
+                    val ownerIndex = (0 until owner.tabCount).singleOrNull {
+                        val page = owner.getComponentAt(it)
+                        page === pane || SwingUtilities.isDescendingFrom(pane, page)
+                    } ?: error("Repeater ancestor changed while selecting it; no request was sent.")
+                    owner.selectedIndex = ownerIndex
+                    verifySelection(identity, requireSelected = false)
+                }
+            val index = (0 until pane.tabCount).single { pane.getTabComponentAt(it) === header }
             flatGroups = (0 until pane.tabCount).any { pane.getComponentAt(it) == null }
             pane.selectedIndex = index
-            identity += SelectionIdentity(pane, header, expectedContent)
             // Selecting a tab synchronously invokes application ChangeListeners. They may
             // close, replace or reorder tabs before this assignment returns.
-            verifySelection(identity)
+            verifySelection(identity, requireSelected = false)
+            verifySelection(identity.take(stepIndex + 1))
             val confirmedIndex = (0 until pane.tabCount).single { pane.getTabComponentAt(it) === header }
             names += pane.getTitleAt(confirmedIndex)
-            content = expectedContent
         }
         // Selecting cached identities avoids cycling through other tabs and resetting Burp's pooled response editor.
         verifySelection(identity)
-        return Selected(RepeaterTab(tabId, names.last(), if (flatGroups) null else names.dropLast(1), "request"), checkNotNull(content), identity)
+        return Selected(RepeaterTab(tabId, names.last(), if (flatGroups) null else names.dropLast(1), "request"), identity.last().content, identity)
     }
 
     private fun snapshot(selected: Selected): RepeaterSnapshot {

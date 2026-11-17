@@ -17,7 +17,7 @@ from pathlib import Path
 
 from h2.config import H2Configuration
 from h2.connection import H2Connection
-from h2.events import DataReceived, RequestReceived, StreamEnded
+from h2.events import ConnectionTerminated, DataReceived, RequestReceived, StreamEnded, StreamReset
 
 
 class State:
@@ -149,7 +149,13 @@ class Target(socketserver.BaseRequestHandler):
             if data == b'':
                 return
             for event in h2.receive_data(data) if data is not None else []:
-                if isinstance(event, RequestReceived):
+                if isinstance(event, ConnectionTerminated):
+                    return
+                elif isinstance(event, StreamReset):
+                    streams.pop(event.stream_id, None)
+                    deferred.pop(event.stream_id, None)
+                    pending.pop(event.stream_id, None)
+                elif isinstance(event, RequestReceived):
                     streams[event.stream_id] = [event.headers, bytearray()]
                 elif isinstance(event, DataReceived):
                     streams[event.stream_id][1].extend(event.data)

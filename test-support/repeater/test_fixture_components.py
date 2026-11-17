@@ -72,6 +72,49 @@ class FixtureComponents(unittest.TestCase):
         self.assertEqual([3, 1], ended)
         self.assertEqual(['/delay', '/echo'], [record['path'] for record in state.records])
 
+    def test_reset_gated_h2_stream_does_not_abort_connection(self):
+        client = H2Connection(config=H2Configuration(client_side=True, header_encoding='utf-8'))
+        client.initiate_connection()
+
+        def request(stream_id, path, end_stream=True):
+            client.send_headers(stream_id, [(':method', 'GET'), (':scheme', 'https'),
+                                           (':authority', 'localhost'), (':path', path)], end_stream=end_stream)
+
+        request(1, '/delay')
+        request(3, '/echo')
+        initial = client.data_to_send()
+        ended = []
+        state = self.state
+
+        class Connection:
+            reads = 0
+
+            def settimeout(self, timeout):
+                pass
+
+            def sendall(self, data):
+                ended.extend(event.stream_id for event in client.receive_data(data) if isinstance(event, StreamEnded))
+
+            def recv(self, limit):
+                self.reads += 1
+                if self.reads == 1:
+                    return initial
+                if self.reads == 2:
+                    if ended != [3]:
+                        raise AssertionError(f'expected stream 3 before reset, got {ended}')
+                    client.reset_stream(1)
+                    # Reset an unfinished upload too, challenging active-stream cleanup.
+                    request(5, '/echo', end_stream=False)
+                    client.reset_stream(5)
+                    request(7, '/echo')
+                    state.gate.set()
+                    return client.data_to_send()
+                return b''
+
+        self.target.http2(Connection(), 'h2')
+        self.assertEqual([3, 7], ended)
+        self.assertEqual(['/delay', '/echo', '/echo'], [record['path'] for record in state.records])
+
 
 if __name__ == '__main__':
     unittest.main()

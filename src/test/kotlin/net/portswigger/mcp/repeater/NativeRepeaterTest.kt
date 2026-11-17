@@ -8,6 +8,57 @@ import javax.swing.*
 
 class NativeRepeaterTest {
     @Test
+    fun `suite and group activation callbacks cannot replace captured target identity`() = runBlocking {
+        for (boundary in listOf("suite", "group")) {
+            for (mutation in listOf("remove", "header", "content", "reparent")) {
+                for (action in listOf("read", "edit", "send")) {
+                    val f = Fixture()
+                    f.add("baseline")
+                    val leafPane = if (boundary == "group") JTabbedPane().also {
+                        f.tabs.addTab("group", it)
+                        f.tabs.setTabComponentAt(1, JLabel("group"))
+                    } else f.tabs
+                    val targetIndex = if (boundary == "group") 0 else 1
+                    val original = f.add("target", owner = leafPane)
+                    val neighbor = f.add("neighbor", owner = leafPane)
+                    val holder = JTabbedPane()
+                    val replacement = f.add("replacement", owner = holder)
+                    val replacementPanel = holder.getComponentAt(0)
+                    val before = f.native.read(f.native.tabs().single { it.name == "target" }.tabId)
+                    SwingUtilities.invokeAndWait {
+                        val owner = if (boundary == "suite") f.suite else f.tabs
+                        owner.selectedIndex = 0
+                        var changed = false
+                        owner.addChangeListener {
+                            if (!changed && owner.selectedIndex == 1) {
+                                changed = true
+                                when (mutation) {
+                                    "remove" -> leafPane.removeTabAt(targetIndex)
+                                    "header" -> leafPane.setTabComponentAt(targetIndex, JLabel("replacement"))
+                                    "content" -> leafPane.setComponentAt(targetIndex, replacementPanel)
+                                    "reparent" -> JPanel().add(leafPane)
+                                }
+                            }
+                        }
+                    }
+                    assertThrows(IllegalArgumentException::class.java, { runBlocking {
+                        when (action) {
+                            "read" -> f.native.read(before.tabId)
+                            "edit" -> f.native.investigateEdit(before.tabId, before.fingerprint,
+                                before.request.replace("/one", "/REPLACED-TAB"))
+                            "send" -> f.native.send(before.tabId, before.fingerprint)
+                        }
+                    } }, "$boundary/$mutation during $action")
+                    assertEquals(before.request, original.text)
+                    assertEquals(before.request, neighbor.text)
+                    assertEquals(before.request, replacement.text)
+                    assertEquals(0, f.sends)
+                }
+            }
+        }
+    }
+
+    @Test
     fun `read edit and send refuse replaced header content or reparented pane after selection`() = runBlocking {
         for (mutation in listOf("remove", "header", "content", "reparent")) {
             for (action in listOf("read", "edit", "send")) {
