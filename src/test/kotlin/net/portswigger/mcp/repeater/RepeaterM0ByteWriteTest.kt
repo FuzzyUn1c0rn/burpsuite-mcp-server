@@ -91,6 +91,10 @@ class RepeaterM0ByteWriteTest {
         assertEquals("850f7dc43910ff890f8879c0ed26fe697c93a067ad93a7d50f466a7028a9bf4e", observed.modelBodySha256)
         assertFalse(observed.configuredProtocolVerified)
         assertTrue(checkNotNull(observed.constructorDiagnostics).exactBytesEqual)
+        val readback = checkNotNull(observed.readbackDiagnostics)
+        assertEquals(m0ByteHash(f.newBytes), readback.requestSha256)
+        assertTrue(readback.equalsReplacementBytes && readback.serviceEqual && readback.messageVersionEqual)
+        assertFalse(readback.equalsOriginalBytes)
         assertFalse(Json.encodeToString(observed).contains("PRIVATE_PATH"))
         f.invoke(probe)
         assertEquals(1, f.setters)
@@ -169,6 +173,12 @@ class RepeaterM0ByteWriteTest {
             assertNull(observed.modelRequestSha256, scenario)
             assertFalse(Json.encodeToString(observed).contains("PRIVATE_"), scenario)
             assertEquals(1, f.setters, scenario)
+            if (scenario == "stale") {
+                val readback = checkNotNull(observed.readbackDiagnostics)
+                assertEquals(m0ByteHash(f.oldBytes), readback.requestSha256)
+                assertTrue(readback.equalsOriginalBytes && readback.serviceEqual && readback.messageVersionEqual)
+                assertFalse(readback.equalsReplacementBytes)
+            }
         }
     }
 

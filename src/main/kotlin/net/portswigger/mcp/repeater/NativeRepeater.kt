@@ -99,7 +99,7 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         fun tableValid() = requestRegion != null && hexTable != null && regionValid() &&
             visibleTables(requestRegion).singleOrNull() === hexTable
         val actionBar = M0ActionBar.capture(selected.content, requestOwner, responseOwner)
-        M0ContextTarget(tabId, viewName, canMutateNow = {
+        M0ContextTarget(tabId, viewName, automaticSource = hexTable, canMutateNow = {
             check(SwingUtilities.isEventDispatchThread())
             verifySelection(selected.identity)
             boundaryValid() && actionBar?.ready() == true

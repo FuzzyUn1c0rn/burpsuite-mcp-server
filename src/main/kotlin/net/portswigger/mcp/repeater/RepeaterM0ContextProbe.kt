@@ -13,11 +13,15 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
 import java.awt.Component
 import java.security.MessageDigest
 import javax.swing.SwingUtilities
+import javax.swing.JTable
+import net.portswigger.mcp.Swing
 import java.util.concurrent.atomic.AtomicReference
 
 /** Identity validator is transient and released when the observation closes. */
@@ -27,6 +31,7 @@ internal class M0ContextTarget(
     val canMutateNow: () -> Boolean = { false },
     val describeMutationReadiness: (() -> M0NativeReadiness)? = null,
     val matchesNativeService: (String, Int, Boolean) -> Boolean = { _, _, _ -> true },
+    val automaticSource: JTable? = null,
     val ownsSource: (Component) -> Boolean
 )
 
@@ -35,8 +40,10 @@ internal class RepeaterM0ContextProbe(
     target: M0ContextTarget, private val startedAtMillis: Long = System.currentTimeMillis(),
     writePlan: M0ByteWritePlan? = null,
     private val permissionStillValid: () -> Boolean = { true },
-    private val constructRequest: (HttpService, ByteArray) -> HttpRequest = ::constructM0ByteRequest
+    private val constructRequest: (HttpService, ByteArray) -> HttpRequest = ::constructM0ByteRequest,
+    private val automaticContext: M0AutomaticContext? = null
 ) : ContextMenuItemsProvider {
+    init { require(automaticContext == null || writePlan == null) { "M0_AUTOMATIC_CONTEXT_IS_READ_ONLY" } }
     @Volatile private var target: M0ContextTarget? = target
     @Volatile private var writePlan: M0ByteWritePlan? = writePlan
     private enum class Admission { OPEN, MUTATION_STARTED, CLOSED }
@@ -51,16 +58,27 @@ internal class RepeaterM0ContextProbe(
         var observedInvocation: String? = null
         var constructorDiagnostics: M0ConstructorObservation? = null
         var mutationGuards: M0MutationGuards? = null
+        var readbackDiagnostics: M0ReadbackObservation? = null
         fun reject(reason: String, ownership: M0ContextOwnership? = null) {
             if (target === current) {
                 val attempted = admission.get() == Admission.MUTATION_STARTED
                 result.complete(M0ContextModelObservation(if (attempted) "mutation_unconfirmed" else "rejected", reason,
                     current.tabId, current.view, modelWriteAttempted = attempted,
                     ownership = ownership, observedInvocationType = observedInvocation, mutationMayHaveOccurred = attempted,
-                    constructorDiagnostics = constructorDiagnostics, mutationGuards = mutationGuards))
+                    constructorDiagnostics = constructorDiagnostics, mutationGuards = mutationGuards,
+                    readbackDiagnostics = readbackDiagnostics))
             }
         }
         fun closed() = target !== current || result.isCompleted
+        fun stopModelAccess(): Boolean {
+            if (closed()) return true
+            if (!permissionStillValid()) {
+                reject(if (admission.get() == Admission.MUTATION_STARTED) "POST_MUTATION_PERMISSION_CHANGED"
+                    else "PERMISSION_CHANGED_DURING_MODEL_READ")
+                return true
+            }
+            return false
+        }
         try {
             if (!event.isFromTool(ToolType.REPEATER) || closed()) return emptyList()
             if (!SwingUtilities.isEventDispatchThread()) {
@@ -69,7 +87,8 @@ internal class RepeaterM0ContextProbe(
             }
             val input = event.inputEvent()
             if (closed()) return emptyList()
-            if (input.`when` <= startedAtMillis) {
+            if (automaticContext != null && !automaticContext.accept(input)) return emptyList()
+            if (automaticContext == null && input.`when` <= startedAtMillis) {
                 reject("EVENT_NOT_NEWER_THAN_OBSERVATION")
                 return emptyList()
             }
@@ -101,7 +120,7 @@ internal class RepeaterM0ContextProbe(
             if (closed()) return emptyList()
             if (plan != null && current.view != "Hex") { reject("M0_BYTE_WRITER_REQUIRES_HEX"); return emptyList() }
             if (!permissionStillValid()) { reject("PERMISSION_CHANGED_BEFORE_MODEL_READ"); return emptyList() }
-            var snapshot = copyM0EditorModel(editor, ::closed) ?: return emptyList()
+            var snapshot = copyM0EditorModel(editor, ::stopModelAccess) ?: return emptyList()
             fun mutationReady(stage: String): Boolean {
                 val owned = current.ownsSource(source)
                 val idle = if (owned) try { current.canMutateNow() &&
@@ -122,14 +141,14 @@ internal class RepeaterM0ContextProbe(
                 if (!mutationReady("before_constructor")) return emptyList()
                 val replacementBytes = plan.replacementCopy()
                 val replacement = constructRequest(snapshot.service, replacementBytes)
-                val constructed = copyM0RequestModel(replacement, ::closed) ?: return emptyList()
+                val constructed = copyM0RequestModel(replacement, ::stopModelAccess) ?: return emptyList()
                 constructorDiagnostics = M0ConstructorObservation(constructed.bytes.contentEquals(replacementBytes),
                     constructed.sameService(snapshot), constructed.version == snapshot.version,
                     constructed.body.size, m0ByteHash(constructed.body), constructed.version)
                 if (!constructed.bytes.contentEquals(replacementBytes) || !constructed.sameServiceProtocol(snapshot)) {
                     reject("CONSTRUCTOR_BYTES_OR_INVARIANTS_UNSUPPORTED"); return emptyList()
                 }
-                val currentSnapshot = copyM0EditorModel(editor, ::closed) ?: return emptyList()
+                val currentSnapshot = copyM0EditorModel(editor, ::stopModelAccess) ?: return emptyList()
                 if (!currentSnapshot.bytes.contentEquals(snapshot.bytes) || !currentSnapshot.sameServiceProtocol(snapshot)) {
                     reject("MODEL_CHANGED_BEFORE_MUTATION"); return emptyList()
                 }
@@ -143,7 +162,10 @@ internal class RepeaterM0ContextProbe(
                 if (!permissionStillValid() || !current.ownsSource(source)) {
                     reject("POST_MUTATION_PERMISSION_OR_IDENTITY_CHANGED"); return emptyList()
                 }
-                val readback = copyM0EditorModel(editor, ::closed) ?: return emptyList()
+                val readback = copyM0EditorModel(editor, ::stopModelAccess) ?: return emptyList()
+                readbackDiagnostics = M0ReadbackObservation(readback.bytes.size, sha256(readback.bytes),
+                    readback.body.size, sha256(readback.body), readback.bytes.contentEquals(snapshot.bytes),
+                    readback.bytes.contentEquals(replacementBytes), readback.sameService(snapshot), readback.version == snapshot.version)
                 if (!readback.bytes.contentEquals(replacementBytes) || !readback.sameServiceProtocol(snapshot)) {
                     reject("MODEL_READBACK_UNCONFIRMED"); return emptyList()
                 }
@@ -154,9 +176,13 @@ internal class RepeaterM0ContextProbe(
                 current.tabId, current.view, snapshot.bytes.size, sha256(snapshot.bytes), snapshot.body.size, sha256(snapshot.body),
                 snapshot.host, snapshot.port, snapshot.tls, snapshot.version, modelWriteAttempted = plan != null,
                 observedInvocationType = observedInvocation, mutationMayHaveOccurred = plan != null, modelWriteConfirmed = plan != null,
-                constructorDiagnostics = constructorDiagnostics)
+                constructorDiagnostics = constructorDiagnostics, readbackDiagnostics = readbackDiagnostics,
+                nativeReadiness = try { current.describeMutationReadiness?.invoke() } catch (_: Exception) { null })
             if (closed()) return emptyList()
-            if (plan != null && !permissionStillValid()) { reject("POST_MUTATION_PERMISSION_CHANGED"); return emptyList() }
+            if (!permissionStillValid()) {
+                reject(if (plan == null) "PERMISSION_CHANGED_DURING_MODEL_READ" else "POST_MUTATION_PERMISSION_CHANGED")
+                return emptyList()
+            }
             if (!current.ownsSource(source)) reject("IDENTITY_CHANGED_DURING_MODEL_READ")
             else if (target === current) result.complete(observation)
         } catch (failure: M0ModelFailure) {
@@ -205,6 +231,7 @@ private data class M0ModelBytes(
 }
 
 private fun copyM0EditorModel(editor: MessageEditorHttpRequestResponse, closed: () -> Boolean): M0ModelBytes? {
+    if (closed()) return null
     val pair = editor.requestResponse()
     if (closed()) return null
     val request = pair.request()
@@ -213,11 +240,16 @@ private fun copyM0EditorModel(editor: MessageEditorHttpRequestResponse, closed: 
 }
 
 private fun copyM0RequestModel(request: HttpRequest, closed: () -> Boolean): M0ModelBytes? {
+    if (closed()) return null
     val message = request.toByteArray()
     if (closed()) return null
     val body = request.body()
     if (closed()) return null
-    if (message.length() !in 0..262_144 || body.length() !in 0..262_144) throw M0ModelFailure("MODEL_REQUEST_TOO_LARGE")
+    val messageLength = message.length()
+    if (closed()) return null
+    val bodyLength = body.length()
+    if (closed()) return null
+    if (messageLength !in 0..262_144 || bodyLength !in 0..262_144) throw M0ModelFailure("MODEL_REQUEST_TOO_LARGE")
     if (closed()) return null
     val bytes = message.bytes
     if (closed()) return null
@@ -228,9 +260,13 @@ private fun copyM0RequestModel(request: HttpRequest, closed: () -> Boolean): M0M
         !bytes.copyOfRange(offset, bytes.size).contentEquals(bodyBytes)) throw M0ModelFailure("MODEL_BYTES_INCONSISTENT")
     if (closed()) return null
     val service = request.httpService()
+    if (closed()) return null
     val host = service.host()
+    if (closed()) return null
     val port = service.port()
+    if (closed()) return null
     val tls = service.secure()
+    if (closed()) return null
     if (host.length !in 1..253 || port !in 1..65535) throw M0ModelFailure("MODEL_DESTINATION_UNSUPPORTED")
     val version = request.httpVersion().takeIf {
         it in setOf("HTTP/1.0", "HTTP/1.1", "HTTP/2", "HTTP/2.0", "1.0", "1.1", "2", "2.0")
@@ -240,39 +276,67 @@ private fun copyM0RequestModel(request: HttpRequest, closed: () -> Boolean): M0M
 
 internal suspend fun observeM0ContextModel(api: MontoyaApi, native: NativeRepeater, tabId: String,
     writePlan: M0ByteWritePlan? = null, permissionStillValid: () -> Boolean = { true },
-    constructRequest: (HttpService, ByteArray) -> HttpRequest = ::constructM0ByteRequest): M0ContextModelObservation {
+    constructRequest: (HttpService, ByteArray) -> HttpRequest = ::constructM0ByteRequest,
+    automaticRead: Boolean = false, automaticUi: M0AutomaticContextUi = M0AutomaticContextUi(),
+    deadlineMillis: Long = 30_000): M0ContextModelObservation {
     val target = native.modelContextTarget(tabId)
     require(writePlan == null || target.view == "Hex") { "M0_BYTE_WRITER_REQUIRES_HEX" }
+    require(!automaticRead || writePlan == null && target.view == "Hex" && target.automaticSource != null) {
+        "M0_AUTOMATIC_READ_REQUIRES_CAPTURED_HEX_TABLE"
+    }
+    val automatic = if (automaticRead) M0AutomaticContext(checkNotNull(target.automaticSource),
+        target.ownsSource, permissionStillValid, automaticUi) else null
     val probe = RepeaterM0ContextProbe(target, writePlan = writePlan, permissionStillValid = permissionStillValid,
-        constructRequest = constructRequest)
-    val callContext = currentCoroutineContext()
-    // This child has no running body/children, so parent cancellation completes it
-    // immediately even if the caller is blocked inside external registration.
-    val cancellationLease = Job(callContext[Job])
-    val cancelHandler = cancellationLease.invokeOnCompletion { cause -> if (cause != null) probe.close() }
-    var registration: burp.api.montoya.core.Registration? = null
+        constructRequest = constructRequest, automaticContext = automatic)
     var cleanupFailed = false
     val observation = try {
-        callContext.ensureActive()
-        try {
-            registration = api.userInterface().registerContextMenuItemsProvider(probe)
-        } catch (_: Exception) {
-            callContext.ensureActive()
-            return probe.closeForRegistrationFailure(tabId, target.view)
-        }
-        callContext.ensureActive()
-        withTimeoutOrNull(30_000) { probe.result.await() }
-            ?: probe.closeForTimeout(tabId, target.view)
+        withTimeoutOrNull(deadlineMillis) {
+            val callContext = currentCoroutineContext()
+            // Immediate cancellation completion also closes issuance while a public
+            // registration call is blocked. No internal coroutine APIs or EDT locks.
+            val cancellationLease = Job(callContext[Job])
+            val cancelHandler = cancellationLease.invokeOnCompletion { cause ->
+                if (cause != null) { automatic?.close(); probe.close() }
+            }
+            var registration: burp.api.montoya.core.Registration? = null
+            try {
+                callContext.ensureActive()
+                try { registration = api.userInterface().registerContextMenuItemsProvider(probe) }
+                catch (_: Exception) {
+                    callContext.ensureActive()
+                    return@withTimeoutOrNull probe.closeForRegistrationFailure(tabId, target.view)
+                }
+                callContext.ensureActive()
+                if (automatic != null) {
+                    val dispatched = try { withContext(Dispatchers.Swing) {
+                        callContext.ensureActive()
+                        automatic.dispatchOnce()
+                    } } catch (_: Exception) {
+                        callContext.ensureActive()
+                        false
+                    }
+                    if (!dispatched) return@withTimeoutOrNull M0ContextModelObservation("rejected",
+                        "AUTOMATIC_CONTEXT_DISPATCH_OR_POPUP_UNCONFIRMED", tabId, target.view)
+                }
+                callContext.ensureActive()
+                probe.result.await()
+            } finally {
+                automatic?.close()
+                probe.close()
+                cancelHandler.dispose()
+                cancellationLease.complete()
+                try { registration?.deregister() } catch (_: Exception) { cleanupFailed = true }
+            }
+        } ?: probe.closeForTimeout(tabId, target.view)
     } finally {
+        automatic?.close()
         probe.close()
-        cancelHandler.dispose()
-        cancellationLease.complete()
-        try { registration?.deregister() } catch (_: Exception) { cleanupFailed = true }
     }
-    return if (cleanupFailed) observation.copy(
-        status = if (observation.modelWriteAttempted) "mutation_unconfirmed" else "rejected",
+    val reported = observation.copy(automaticContext = automatic?.diagnostics())
+    return if (cleanupFailed) reported.copy(
+        status = if (reported.modelWriteAttempted) "mutation_unconfirmed" else "rejected",
         reason = "M0_CONTEXT_DEREGISTRATION_UNCONFIRMED", modelWriteConfirmed = false
-    ) else observation
+    ) else reported
 }
 
 @Serializable
@@ -292,7 +356,17 @@ internal data class M0ContextModelObservation(
     val configuredProtocolVerified: Boolean = false,
     val byteInputContract: String = "M0 model bytes only; final editor_text semantics unassigned",
     val constructorDiagnostics: M0ConstructorObservation? = null,
-    val mutationGuards: M0MutationGuards? = null
+    val mutationGuards: M0MutationGuards? = null,
+    val nativeReadiness: M0NativeReadiness? = null,
+    val readbackDiagnostics: M0ReadbackObservation? = null,
+    val automaticContext: M0AutomaticContextObservation? = null
+)
+
+@Serializable
+internal data class M0ReadbackObservation(
+    val requestByteLength: Int, val requestSha256: String, val bodyByteLength: Int, val bodySha256: String,
+    val equalsOriginalBytes: Boolean, val equalsReplacementBytes: Boolean,
+    val serviceEqual: Boolean, val messageVersionEqual: Boolean
 )
 
 @Serializable
