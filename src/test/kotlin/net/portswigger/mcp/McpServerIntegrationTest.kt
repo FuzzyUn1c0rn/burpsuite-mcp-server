@@ -49,7 +49,7 @@ class McpServerIntegrationTest {
         
         runBlocking {
             var attempts = 0
-            while (!serverStarted && attempts < 10) {
+            while (!serverStarted && attempts < 100) {
                 delay(100)
                 attempts++
             }

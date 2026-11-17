@@ -144,6 +144,61 @@ it without the plugin.
 By default the extension asks for approval in Burp before sending HTTP requests or reading proxy history, so keep an
 eye on Burp while Codex works, or use the auto-approve options in the `MCP` tab.
 
+## Experimental native Repeater proof of concept
+
+The current feature-branch build is an **M0 investigation candidate**, not an
+accepted Repeater MVP release. The behavior and historical observations below
+describe the imported PoC. Effective protocol/settings checks and native-model
+editing remain unverified for this revision. See
+[the M0 runbook](test-support/repeater/M0.md) for the isolated investigation
+setup, explicitly enabled temporary probe, evidence gaps, and support matrix.
+
+Three tools operate existing native HTTP Repeater tabs through Swing:
+
+1. `get_repeater_tabs` returns generated `tabId` values and names. `kind` is
+   `request` or `group`; group headers cannot be sent. Requests in collapsed groups
+   can also be selected by ID. `groupPath` is `null` where Burp's flat group layout does not expose
+   reliable membership.
+2. `get_repeater_tab` takes `tabId` and returns the request, displayed response,
+   actual target, and a `fingerprint`.
+3. `send_repeater_tab` takes `tabId`, `expectedFingerprint`, `timeoutMs` (default
+   10000), and `maxResponseLength` (default 20000). It selects that tab, checks that
+   the request and target still match, clicks native Send, and returns a fresh
+   exchange captured by Burp's HTTP handler. It does not use the separate HTTP
+   send tools. The response includes its Burp `messageId` and `responseTruncated`.
+
+For a new request, use `create_repeater_tab` or `create_repeater_tab_http2`, then
+list tabs to obtain its ID (tab creation is asynchronous, so it may appear on a
+subsequent list call). Names may be duplicated; sending always requires an
+ID and the fingerprint returned by reading that tab. IDs expire when the server
+restarts or a tab closes. Listing selects the Repeater tool;
+reading and sending leave the requested tab selected.
+
+Repeater access uses the existing project data approval setting, with its own
+"Always allow Repeater access" checkbox. Sending also uses the existing target
+approval check. Missing tabs, changed requests or targets, busy tabs, and
+ambiguous controls produce an error before the Send click.
+
+This is an unsupported UI integration, so Burp updates may break it. Keep HTTP
+editors in Pretty or Raw view and use single-request Send mode. WebSocket tabs,
+detached Repeater windows, full history retrieval, and request editing are outside
+this proof of concept. Requests changed by session rules or other extensions may
+not match the response observer. Redirect chains are not aggregated; the observer
+returns the first matching exchange. Do not manually send identical requests
+while an MCP send is running, because the API exposes no originating tab ID.
+
+A timeout or cancellation after Send **does not stop the request in Burp**.
+Inspect Burp before retrying. The tool makes no automatic retries.
+
+Live validation used Burp Suite Community 2026.10.1 with a loopback test server:
+existing and newly created tabs, duplicate names, expanded and collapsed groups,
+closed-tab rejection, HTTP/1.1,
+HTTP/2 over TLS/ALPN, response truncation, and a timeout without retries.
+The tab's request-line text alone does not force HTTP/2 transport; Burp's native
+protocol settings and negotiation apply. Cleartext HTTP/2 is outside this proof
+of concept. A response that Burp has not finished rendering may be returned as
+`null`; reading the tab again does not resend it.
+
 ## Manual installations
 If you want to install the MCP server manually you can either use the extension's SSE server directly or the packaged
 Stdio proxy server.

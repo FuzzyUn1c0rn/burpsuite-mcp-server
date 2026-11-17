@@ -48,6 +48,16 @@ class McpConfig(storage: PersistedObject, private val logging: Logging) {
             }
         }
 
+    private var _alwaysAllowRepeater by storage.boolean(false)
+    var alwaysAllowRepeater: Boolean
+        get() = _alwaysAllowRepeater
+        set(value) {
+            if (_alwaysAllowRepeater != value) {
+                _alwaysAllowRepeater = value
+                notifyDataAccessChanged()
+            }
+        }
+
     var filterConfigCredentials by storage.boolean(true)
 
     private var _autoApproveTargets by storage.stringList("")

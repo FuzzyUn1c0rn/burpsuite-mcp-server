@@ -1,0 +1,187 @@
+package net.portswigger.mcp.repeater
+
+import burp.api.montoya.MontoyaApi
+import burp.api.montoya.core.ToolType
+import burp.api.montoya.http.handler.HttpHandler
+import burp.api.montoya.http.handler.HttpRequestToBeSent
+import burp.api.montoya.http.handler.HttpResponseReceived
+import burp.api.montoya.http.handler.RequestToBeSentAction
+import burp.api.montoya.http.handler.ResponseReceivedAction
+import io.modelcontextprotocol.kotlin.sdk.server.Server
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import net.portswigger.mcp.config.McpConfig
+import net.portswigger.mcp.security.DataAccessSecurity
+import net.portswigger.mcp.security.DataAccessType
+import net.portswigger.mcp.security.HttpRequestSecurity
+import net.portswigger.mcp.tools.mcpTool
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+
+internal fun Server.registerNativeRepeaterTools(api: MontoyaApi, config: McpConfig) {
+    val native = NativeRepeater { api.userInterface().swingUtils().suiteFrame() }
+    val operations = Mutex()
+    suspend fun checkReadPermission() {
+        check(DataAccessSecurity.checkDataAccessPermission(DataAccessType.REPEATER, config)) {
+            "Repeater data access denied by Burp Suite."
+        }
+    }
+
+    if (java.lang.Boolean.getBoolean("net.portswigger.mcp.repeater.m0")) {
+    val probeJson = Json { encodeDefaults = true }
+    mcpTool<RepeaterM0Probe>("M0 INVESTIGATION ONLY, not a supported MVP operation. Requires acknowledgement=M0_UNVERIFIED_NATIVE_MODEL. Inspect returns bounded read-only control metadata with all effective settings explicitly unverified. edit performs an experimental guarded text-widget update; fixture/native Send evidence is required to establish whether it updates Burp's model. Never sends or changes settings. Use only synthetic requests in the disposable M0 project.") {
+        require(acknowledgement == "M0_UNVERIFIED_NATIVE_MODEL") { "Explicit M0 investigation acknowledgement required" }
+        require(action in setOf("inspect", "edit")) { "action must be inspect or edit" }
+        require((action == "edit") == (requestContent != null && expectedFingerprint != null)) {
+            "edit requires requestContent and expectedFingerprint; inspect accepts neither"
+        }
+        if (action == "inspect") require(requestContent == null && expectedFingerprint == null)
+        checkReadPermission()
+        operations.withLock {
+            if (action == "edit") {
+                val snapshot = native.investigateEdit(tabId, checkNotNull(expectedFingerprint), checkNotNull(requestContent))
+                probeJson.encodeToString(RepeaterM0EditResult(snapshot.tabId, snapshot.fingerprint,
+                    snapshot.targetHostname, snapshot.targetPort, snapshot.usesHttps))
+            } else {
+                probeJson.encodeToString(RepeaterM0Inspection(native.investigateControls(tabId)))
+            }
+        }
+    }
+    }
+
+    mcpTool<GetRepeaterTabs>("Experimental native Swing Repeater control. Lists native tab IDs and names, including collapsed groups' request tabs. kind=group identifies headers that cannot be sent. groupPath=null means membership is unavailable in Burp's flat group layout. Selects Repeater. IDs last until server restart or tab closure; duplicate names are allowed.") {
+        checkReadPermission()
+        operations.withLock { Json.encodeToString(native.tabs()) }
+    }
+
+    mcpTool<GetRepeaterTab>("Experimental: selects the exact native Repeater tab ID and reads its current request, displayed response, target and fingerprint. Use get_repeater_tabs first. Only HTTP tabs in Pretty/Raw views are supported.") {
+        checkReadPermission()
+        operations.withLock { Json.encodeToString(native.read(tabId)) }
+    }
+
+    mcpTool<SendRepeaterTab>("Experimental: clicks Send in the exact native Repeater tab and returns the first matching HTTP exchange. Requires the fingerprint from get_repeater_tab; rejects changed or closed tabs. Do not manually send identical requests concurrently. A timeout or cancellation after the click does not cancel Burp's request: inspect Burp before retrying. Single-request mode only; redirects and session rules can prevent exact capture.") {
+        val timeout = timeoutMs ?: 10_000
+        val responseLimit = maxResponseLength ?: 20_000
+        require(timeout in 100..60_000) { "timeoutMs must be between 100 and 60000." }
+        require(responseLimit in 1..200_000) { "maxResponseLength must be between 1 and 200000." }
+        checkReadPermission()
+        operations.withLock {
+            val expected = native.read(tabId)
+            require(expected.fingerprint == expectedFingerprint) {
+                "Repeater request or target changed. Read the tab again before sending."
+            }
+            check(HttpRequestSecurity.checkHttpRequestPermission(
+                expected.targetHostname, expected.targetPort, config, expected.request, api
+            )) { "Repeater send denied by Burp Suite." }
+            currentCoroutineContext().ensureActive()
+            val capture = RepeaterExchangeCapture(expected)
+            val registration = api.http().registerHttpHandler(capture)
+            try {
+                native.send(tabId, expectedFingerprint) { capture.arm() }
+                api.logging().logToOutput("MCP native Repeater Send: $tabId ${expected.targetHostname}:${expected.targetPort}")
+                val exchange = withTimeoutOrNull(timeout.toLong()) {
+                    val received = capture.result.await()
+                    // The response handler runs before Burp updates its native completion controls.
+                    try {
+                        native.awaitIdle(tabId)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        error("The request was sent and a response captured, but the native tab changed before completion. Inspect Burp before retrying.")
+                    }
+                    received
+                }
+                    ?: error("No matching Repeater response captured within ${timeout}ms. The native request may still be running or may have been modified by session rules. Inspect Burp before retrying; no retry was made.")
+                Json.encodeToString(RepeaterSendResult(
+                    tabId, exchange.messageId, exchange.request, exchange.response.take(responseLimit),
+                    exchange.response.length > responseLimit
+                ))
+            } finally {
+                registration.deregister()
+            }
+        }
+    }
+}
+
+/** Observe one exact Repeater exchange. Pass all traffic through unchanged. */
+internal class RepeaterExchangeCapture(private val expected: RepeaterSnapshot) : HttpHandler {
+    private val armed = AtomicBoolean(false)
+    private val requestId = AtomicInteger(-1)
+    val result = CompletableDeferred<CapturedRepeaterExchange>()
+
+    fun arm() { armed.set(true) }
+
+    override fun handleHttpRequestToBeSent(request: HttpRequestToBeSent): RequestToBeSentAction {
+        if (armed.get() && request.toolSource().isFromTool(ToolType.REPEATER)) {
+            val service = request.httpService()
+            if (service.host().equals(expected.targetHostname, ignoreCase = true) &&
+                service.port() == expected.targetPort && service.secure() == expected.usesHttps &&
+                canonicalRequest(request.toString()) == canonicalRequest(expected.request)) {
+                requestId.compareAndSet(-1, request.messageId())
+            }
+        }
+        return RequestToBeSentAction.continueWith(request, request.annotations())
+    }
+
+    override fun handleHttpResponseReceived(response: HttpResponseReceived): ResponseReceivedAction {
+        if (requestId.get() >= 0 && response.toolSource().isFromTool(ToolType.REPEATER) && response.messageId() == requestId.get()) {
+            result.complete(CapturedRepeaterExchange(
+                response.messageId(), response.initiatingRequest().toString(), response.toString()
+            ))
+        }
+        return ResponseReceivedAction.continueWith(response, response.annotations())
+    }
+}
+
+internal data class CapturedRepeaterExchange(val messageId: Int, val request: String, val response: String)
+
+@Serializable
+internal class GetRepeaterTabs
+
+@Serializable
+internal data class GetRepeaterTab(val tabId: String)
+
+@Serializable
+internal data class SendRepeaterTab(
+    val tabId: String, val expectedFingerprint: String,
+    val timeoutMs: Int? = null, val maxResponseLength: Int? = null
+)
+
+@Serializable
+internal data class RepeaterSendResult(
+    val tabId: String, val messageId: Int, val request: String,
+    val response: String, val responseTruncated: Boolean
+)
+
+@Serializable
+internal data class RepeaterM0Probe(
+    val tabId: String, val action: String, val acknowledgement: String,
+    val expectedFingerprint: String? = null, val requestContent: String? = null
+)
+
+@Serializable
+internal data class RepeaterM0Inspection(
+    val controls: List<RepeaterControlProbe>,
+    val configuredProtocol: String = "unverified",
+    val redirectPolicy: String = "unverified",
+    val groupSendMode: String = "unverified",
+    val sessionRulesAndMacros: String = "unverified",
+    val destinationOverrides: String = "unverified",
+    val profileVerified: Boolean = false,
+    val purpose: String = "M0 characterization; control labels are not effective-state proof"
+)
+
+@Serializable
+internal data class RepeaterM0EditResult(
+    val tabId: String, val fingerprint: String, val targetHostname: String,
+    val targetPort: Int, val usesHttps: Boolean,
+    val mutationMayHaveOccurred: Boolean = true,
+    val nativeModelVerified: Boolean = false
+)

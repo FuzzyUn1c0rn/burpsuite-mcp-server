@@ -1,0 +1,53 @@
+package net.portswigger.mcp.repeater
+
+import io.mockk.*
+import kotlinx.coroutines.runBlocking
+import net.portswigger.mcp.config.McpConfig
+import net.portswigger.mcp.security.DataAccessApprovalHandler
+import net.portswigger.mcp.security.DataAccessSecurity
+import net.portswigger.mcp.security.DataAccessType
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assertions.*
+import org.junit.jupiter.api.Test
+
+class RepeaterPermissionTest {
+    private val original = DataAccessSecurity.approvalHandler
+
+    @AfterEach
+    fun cleanup() {
+        DataAccessSecurity.approvalHandler = original
+        unmockkAll()
+    }
+
+    @Test
+    fun `Repeater needs its own data approval`() = runBlocking {
+        val config = mockk<McpConfig>(relaxed = true)
+        every { config.requireDataAccessApproval } returns true
+        every { config.alwaysAllowHttpHistory } returns true
+        val approval = mockk<DataAccessApprovalHandler>()
+        coEvery { approval.requestDataAccess(DataAccessType.REPEATER, config) } returns false
+        DataAccessSecurity.approvalHandler = approval
+        assertFalse(DataAccessSecurity.checkDataAccessPermission(DataAccessType.REPEATER, config))
+        coVerify(exactly = 1) { approval.requestDataAccess(DataAccessType.REPEATER, config) }
+    }
+
+    @Test
+    fun `explicit Repeater allowance avoids repeated prompts`() = runBlocking {
+        val config = mockk<McpConfig>(relaxed = true)
+        every { config.requireDataAccessApproval } returns true
+        every { config.alwaysAllowRepeater } returns true
+        val approval = mockk<DataAccessApprovalHandler>()
+        DataAccessSecurity.approvalHandler = approval
+        assertTrue(DataAccessSecurity.checkDataAccessPermission(DataAccessType.REPEATER, config))
+        coVerify(exactly = 0) { approval.requestDataAccess(any(), any()) }
+    }
+
+    @Test
+    fun `fingerprints preserve body bytes and include the service`() {
+        val request = "POST / HTTP/1.1\r\nHost: example.test\r\n\r\na\r\nb"
+        val digest = requestFingerprint("example.test", 443, true, request)
+        assertNotEquals(digest, requestFingerprint("example.test", 443, true, request.replace("a\r\nb", "a\nb")))
+        assertNotEquals(digest, requestFingerprint("example.test", 8443, true, request))
+        assertNotEquals(digest, requestFingerprint("example.test", 443, false, request))
+    }
+}
