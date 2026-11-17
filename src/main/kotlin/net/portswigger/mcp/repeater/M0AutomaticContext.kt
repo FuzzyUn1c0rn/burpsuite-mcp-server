@@ -9,7 +9,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import javax.swing.*
 
-/** Read-only, one-event M0 experiment. No native facade or message is retained. */
+/** One-event public Swing lease. No native facade or message is retained. */
 internal class M0AutomaticContext(
     source: JTable, owns: (Component) -> Boolean, permitted: () -> Boolean,
     private val ui: M0AutomaticContextUi = M0AutomaticContextUi()

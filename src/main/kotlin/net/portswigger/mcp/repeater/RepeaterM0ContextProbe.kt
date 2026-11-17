@@ -22,7 +22,7 @@ import java.security.MessageDigest
 import javax.swing.SwingUtilities
 import javax.swing.JTable
 import net.portswigger.mcp.Swing
-import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Identity validator is transient and released when the observation closes. */
 internal class M0ContextTarget(
@@ -41,18 +41,30 @@ internal class RepeaterM0ContextProbe(
     writePlan: M0ByteWritePlan? = null,
     private val permissionStillValid: () -> Boolean = { true },
     private val constructRequest: (HttpService, ByteArray) -> HttpRequest = ::constructM0ByteRequest,
-    private val automaticContext: M0AutomaticContext? = null
+    private val automaticContext: M0AutomaticContext? = null,
+    private val attempt: M0MutationAttempt = M0MutationAttempt(),
+    private val allowAutomaticWrite: Boolean = false,
+    readbackExpectation: M0ReadbackExpectation? = null
 ) : ContextMenuItemsProvider {
-    init { require(automaticContext == null || writePlan == null) { "M0_AUTOMATIC_CONTEXT_IS_READ_ONLY" } }
+    init {
+        require(automaticContext == null || writePlan == null || allowAutomaticWrite) { "M0_AUTOMATIC_CONTEXT_IS_READ_ONLY" }
+        require(readbackExpectation == null || writePlan == null) { "M0_FRESH_READ_PHASE_CANNOT_WRITE" }
+    }
     @Volatile private var target: M0ContextTarget? = target
     @Volatile private var writePlan: M0ByteWritePlan? = writePlan
-    private enum class Admission { OPEN, MUTATION_STARTED, CLOSED }
-    private val admission = AtomicReference(Admission.OPEN)
+    @Volatile private var readbackExpectation: M0ReadbackExpectation? = readbackExpectation
+    private val callbackDepth = AtomicInteger()
+    val callbackExited get() = callbackDepth.get() == 0
     val result = CompletableDeferred<M0ContextModelObservation>()
 
     override fun provideMenuItems(event: ContextMenuEvent): List<Component> {
+        callbackDepth.incrementAndGet()
+        try { return observeCallback(event) } finally { callbackDepth.decrementAndGet() }
+    }
+
+    private fun observeCallback(event: ContextMenuEvent): List<Component> {
         val current = target ?: return emptyList()
-        if (result.isCompleted || admission.get() != Admission.OPEN) return emptyList()
+        if (result.isCompleted || !attempt.open) return emptyList()
         val plan = writePlan
         var phase = "read"
         var observedInvocation: String? = null
@@ -61,7 +73,7 @@ internal class RepeaterM0ContextProbe(
         var readbackDiagnostics: M0ReadbackObservation? = null
         fun reject(reason: String, ownership: M0ContextOwnership? = null) {
             if (target === current) {
-                val attempted = admission.get() == Admission.MUTATION_STARTED
+                val attempted = attempt.attempted
                 result.complete(M0ContextModelObservation(if (attempted) "mutation_unconfirmed" else "rejected", reason,
                     current.tabId, current.view, modelWriteAttempted = attempted,
                     ownership = ownership, observedInvocationType = observedInvocation, mutationMayHaveOccurred = attempted,
@@ -73,7 +85,7 @@ internal class RepeaterM0ContextProbe(
         fun stopModelAccess(): Boolean {
             if (closed()) return true
             if (!permissionStillValid()) {
-                reject(if (admission.get() == Admission.MUTATION_STARTED) "POST_MUTATION_PERMISSION_CHANGED"
+                reject(if (attempt.attempted) "POST_MUTATION_PERMISSION_CHANGED"
                     else "PERMISSION_CHANGED_DURING_MODEL_READ")
                 return true
             }
@@ -153,10 +165,11 @@ internal class RepeaterM0ContextProbe(
                     reject("MODEL_CHANGED_BEFORE_MUTATION"); return emptyList()
                 }
                 if (!mutationReady("before_setter")) return emptyList()
-                if (closed() || !admission.compareAndSet(Admission.OPEN, Admission.MUTATION_STARTED)) return emptyList()
+                if (closed() || !attempt.admit()) return emptyList()
                 // The attempt is recorded BEFORE the void API call. Closing cannot undo it.
                 phase = "setter"
                 editor.setRequest(replacement)
+                attempt.recordNormalReturn()
                 phase = "readback"
                 if (closed()) return emptyList()
                 if (!permissionStillValid() || !current.ownsSource(source)) {
@@ -177,7 +190,8 @@ internal class RepeaterM0ContextProbe(
                 snapshot.host, snapshot.port, snapshot.tls, snapshot.version, modelWriteAttempted = plan != null,
                 observedInvocationType = observedInvocation, mutationMayHaveOccurred = plan != null, modelWriteConfirmed = plan != null,
                 constructorDiagnostics = constructorDiagnostics, readbackDiagnostics = readbackDiagnostics,
-                nativeReadiness = try { current.describeMutationReadiness?.invoke() } catch (_: Exception) { null })
+                nativeReadiness = try { current.describeMutationReadiness?.invoke() } catch (_: Exception) { null },
+                freshReadback = readbackExpectation?.compare(snapshot.bytes, snapshot.host, snapshot.port, snapshot.tls, snapshot.version))
             if (closed()) return emptyList()
             if (!permissionStillValid()) {
                 reject(if (plan == null) "PERMISSION_CHANGED_DURING_MODEL_READ" else "POST_MUTATION_PERMISSION_CHANGED")
@@ -194,15 +208,16 @@ internal class RepeaterM0ContextProbe(
     }
 
     fun close() {
-        admission.compareAndSet(Admission.OPEN, Admission.CLOSED)
+        attempt.close()
         target = null
         writePlan = null
+        readbackExpectation = null
         if (!result.isCompleted) result.cancel()
     }
 
     fun closeForTimeout(tabId: String, view: String): M0ContextModelObservation {
         close()
-        val attempted = admission.get() == Admission.MUTATION_STARTED
+        val attempted = attempt.attempted
         return M0ContextModelObservation(if (attempted) "mutation_unconfirmed" else "not_observed",
             if (attempted) "DEADLINE_AFTER_MUTATION_ADMISSION" else "NO_CONTEXT_EVENT_WITHIN_30000MS", tabId, view,
             modelWriteAttempted = attempted, mutationMayHaveOccurred = attempted)
@@ -210,7 +225,7 @@ internal class RepeaterM0ContextProbe(
 
     fun closeForRegistrationFailure(tabId: String, view: String): M0ContextModelObservation {
         close()
-        val attempted = admission.get() == Admission.MUTATION_STARTED
+        val attempted = attempt.attempted
         return M0ContextModelObservation(if (attempted) "mutation_unconfirmed" else "rejected",
             "M0_CONTEXT_REGISTRATION_UNCONFIRMED", tabId, view,
             modelWriteAttempted = attempted, mutationMayHaveOccurred = attempted)
@@ -284,10 +299,24 @@ internal suspend fun observeM0ContextModel(api: MontoyaApi, native: NativeRepeat
     require(!automaticRead || writePlan == null && target.view == "Hex" && target.automaticSource != null) {
         "M0_AUTOMATIC_READ_REQUIRES_CAPTURED_HEX_TABLE"
     }
-    val automatic = if (automaticRead) M0AutomaticContext(checkNotNull(target.automaticSource),
+    return observeM0ContextOnTarget(api, target, writePlan, permissionStillValid, constructRequest,
+        automaticRead, automaticUi, deadlineMillis)
+}
+
+internal suspend fun observeM0ContextOnTarget(api: MontoyaApi, target: M0ContextTarget,
+    writePlan: M0ByteWritePlan? = null, permissionStillValid: () -> Boolean = { true },
+    constructRequest: (HttpService, ByteArray) -> HttpRequest = ::constructM0ByteRequest,
+    automaticInvocation: Boolean = false, automaticUi: M0AutomaticContextUi = M0AutomaticContextUi(),
+    deadlineMillis: Long = 30_000, attempt: M0MutationAttempt = M0MutationAttempt(),
+    allowAutomaticWrite: Boolean = false, readbackExpectation: M0ReadbackExpectation? = null): M0ContextModelObservation {
+    val tabId = target.tabId
+    require(writePlan == null || target.view == "Hex") { "M0_BYTE_WRITER_REQUIRES_HEX" }
+    require(!automaticInvocation || target.view == "Hex" && target.automaticSource != null) { "M0_AUTOMATIC_CONTEXT_REQUIRES_HEX" }
+    val automatic = if (automaticInvocation) M0AutomaticContext(checkNotNull(target.automaticSource),
         target.ownsSource, permissionStillValid, automaticUi) else null
     val probe = RepeaterM0ContextProbe(target, writePlan = writePlan, permissionStillValid = permissionStillValid,
-        constructRequest = constructRequest, automaticContext = automatic)
+        constructRequest = constructRequest, automaticContext = automatic, attempt = attempt,
+        allowAutomaticWrite = allowAutomaticWrite, readbackExpectation = readbackExpectation)
     var cleanupFailed = false
     val observation = try {
         withTimeoutOrNull(deadlineMillis) {
@@ -315,8 +344,10 @@ internal suspend fun observeM0ContextModel(api: MontoyaApi, native: NativeRepeat
                         callContext.ensureActive()
                         false
                     }
-                    if (!dispatched) return@withTimeoutOrNull M0ContextModelObservation("rejected",
-                        "AUTOMATIC_CONTEXT_DISPATCH_OR_POPUP_UNCONFIRMED", tabId, target.view)
+                    if (!dispatched) return@withTimeoutOrNull M0ContextModelObservation(
+                        if (attempt.attempted) "mutation_unconfirmed" else "rejected",
+                        "AUTOMATIC_CONTEXT_DISPATCH_OR_POPUP_UNCONFIRMED", tabId, target.view,
+                        modelWriteAttempted = attempt.attempted, mutationMayHaveOccurred = attempt.attempted)
                 }
                 callContext.ensureActive()
                 probe.result.await()
@@ -332,7 +363,10 @@ internal suspend fun observeM0ContextModel(api: MontoyaApi, native: NativeRepeat
         automatic?.close()
         probe.close()
     }
-    val reported = observation.copy(automaticContext = automatic?.diagnostics())
+    val reported = observation.copy(automaticContext = automatic?.diagnostics(),
+        modelWriteAttempted = attempt.attempted, mutationMayHaveOccurred = attempt.attempted,
+        setterReturnedNormally = attempt.returnedNormally, callbackExited = probe.callbackExited,
+        providerCleanupConfirmed = !cleanupFailed)
     return if (cleanupFailed) reported.copy(
         status = if (reported.modelWriteAttempted) "mutation_unconfirmed" else "rejected",
         reason = "M0_CONTEXT_DEREGISTRATION_UNCONFIRMED", modelWriteConfirmed = false
@@ -359,8 +393,15 @@ internal data class M0ContextModelObservation(
     val mutationGuards: M0MutationGuards? = null,
     val nativeReadiness: M0NativeReadiness? = null,
     val readbackDiagnostics: M0ReadbackObservation? = null,
-    val automaticContext: M0AutomaticContextObservation? = null
+    val automaticContext: M0AutomaticContextObservation? = null,
+    val setterReturnedNormally: Boolean = false, val callbackExited: Boolean = false,
+    val providerCleanupConfirmed: Boolean = false,
+    val freshReadback: M0FreshReadbackObservation? = null
 )
+
+@Serializable
+internal data class M0FreshReadbackObservation(val completeBytesEqual: Boolean, val serviceEqual: Boolean,
+    val messageVersionEqual: Boolean)
 
 @Serializable
 internal data class M0ReadbackObservation(

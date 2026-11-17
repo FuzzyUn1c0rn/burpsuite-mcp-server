@@ -37,11 +37,13 @@ internal fun Server.registerNativeRepeaterTools(api: MontoyaApi, config: McpConf
 
     if (investigationMode) {
     val probeJson = Json { encodeDefaults = true }
-    mcpTool<RepeaterM0Probe>("M0 INVESTIGATION ONLY, not a supported MVP operation. inspect/edit/model_read require acknowledgement=M0_UNVERIFIED_NATIVE_MODEL. model_read observes public native request-model bytes during a new native request context menu within 30s. model_read_auto requires acknowledgement=M0_AUTO_CONTEXT_READ and attempts one public popup-trigger event on the frozen exact Hex table; strict event-object identity, no writer, Send, focus/view change, settings or retry. model_write_bytes remains manual-context only, requires acknowledgement=M0_BYTE_MODEL_WRITE, expected model hash/service/version and replacementRequestBase64; attempts one guarded setRequest. Base64 is probe-only, not final editor_text. Exact tool/tab already selected. No retained handle, rollback or automatic writer. Synthetic disposable M0 project only.") {
-        require(action in setOf("inspect", "edit", "model_read", "model_read_auto", "model_write_bytes")) { "Unsupported M0 action" }
-        val writing = action == "model_write_bytes"
+    mcpTool<RepeaterM0Probe>("M0 INVESTIGATION ONLY. inspect/edit/model_read require M0_UNVERIFIED_NATIVE_MODEL acknowledgement. model_read_auto requires M0_AUTO_CONTEXT_READ and one exact synchronous public event/owned popup on the frozen Hex table, read-only. model_write_bytes requires M0_BYTE_MODEL_WRITE and manual context. model_write_bytes_auto requires M0_AUTO_BYTE_MODEL_WRITE: one guarded setter, then callback/dispatch exit, popup cleanup and deregistration, later EDT turn and a new read-only context for complete-byte/service/model-version confirmation. Writers require expected model hash/service/version and replacementRequestBase64. Shared automatic-write deadline30s; missing confirmation is possible mutation, never retry. Byte semantics are probe-only, not final editor_text. Exact tool/tab already selected. No Send, view/focus/settings change, rollback or retained facade. Synthetic disposable M0 project only.") {
+        require(action in setOf("inspect", "edit", "model_read", "model_read_auto", "model_write_bytes", "model_write_bytes_auto")) { "Unsupported M0 action" }
+        val automaticWriting = action == "model_write_bytes_auto"
+        val writing = action == "model_write_bytes" || automaticWriting
         val automaticRead = action == "model_read_auto"
-        require(acknowledgement == when { writing -> "M0_BYTE_MODEL_WRITE"; automaticRead -> "M0_AUTO_CONTEXT_READ";
+        require(acknowledgement == when { automaticWriting -> "M0_AUTO_BYTE_MODEL_WRITE";
+            writing -> "M0_BYTE_MODEL_WRITE"; automaticRead -> "M0_AUTO_CONTEXT_READ";
             else -> "M0_UNVERIFIED_NATIVE_MODEL" }) { "Explicit M0 action acknowledgement required" }
         require((action == "edit") == (requestContent != null && expectedFingerprint != null)) {
             "edit requires requestContent and expectedFingerprint; inspect accepts neither"
@@ -63,6 +65,8 @@ internal fun Server.registerNativeRepeaterTools(api: MontoyaApi, config: McpConf
                 val snapshot = native.investigateEdit(tabId, checkNotNull(expectedFingerprint), checkNotNull(requestContent))
                 probeJson.encodeToString(RepeaterM0EditResult(snapshot.tabId, snapshot.fingerprint,
                     snapshot.targetHostname, snapshot.targetPort, snapshot.usesHttps))
+            } else if (automaticWriting) {
+                probeJson.encodeToString(observeM0AutomaticWrite(api, native, tabId, checkNotNull(writePlan), ::permissionStillValid))
             } else if (action == "model_read" || automaticRead || writing) {
                 val observation = observeM0ContextModel(api, native, tabId, writePlan, ::permissionStillValid,
                     automaticRead = automaticRead)
