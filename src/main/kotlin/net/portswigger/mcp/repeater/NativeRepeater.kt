@@ -51,10 +51,10 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         val viewName = views.getTitleAt(viewIndex)
         require(viewName in setOf("Pretty", "Raw", "Hex")) { "Unsupported native request view" }
         val view = views.getComponentAt(viewIndex)
-        fun editorSelectors(root: Component) = components(root).filterIsInstance<JTabbedPane>().filter { pane ->
-            visibleWithin(pane, selected.content) &&
+        fun allEditorSelectors(root: Component) = components(root).filterIsInstance<JTabbedPane>().filter { pane ->
                 (0 until pane.tabCount).map(pane::getTitleAt).containsAll(listOf("Pretty", "Raw", "Hex"))
         }.toList()
+        fun editorSelectors(root: Component) = allEditorSelectors(root).filter { visibleWithin(it, selected.content) }
         fun hasResponseOrInspector(root: Component) = components(root).any { component ->
             (component is JLabel && component.text in setOf("Response", "Inspector")) ||
                 (component is JTabbedPane && (0 until component.tabCount).any { component.getTitleAt(it) == "Inspector" })
@@ -78,8 +78,16 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
             editorSelectors(requestOwner).singleOrNull() === views && !hasResponseOrInspector(requestOwner)) {
             "Cannot prove distinct Request and Response editor owners"
         }
-        val responseViews = editorSelectors(responseOwner).singleOrNull()
-            ?: error("Cannot positively bind the separate Response editor selector")
+        val responseSelectors = allEditorSelectors(responseOwner)
+        require(responseSelectors.size <= 1 && responseSelectors.all { visibleWithin(it, selected.content) }) {
+            "Cannot bind an ambiguous or hidden Response editor selector"
+        }
+        val responseViews = responseSelectors.singleOrNull()
+        fun responseStateValid(): Boolean = if (responseViews != null) {
+            allEditorSelectors(responseOwner).singleOrNull() === responseViews && visibleWithin(responseViews, selected.content)
+        } else {
+            allEditorSelectors(responseOwner).isEmpty()
+        }
         // Burp may use null-page tabs only as selectors. Bind the Hex table through
         // a separately captured narrow Request region, never the whole leaf tab.
         val requestRegion = if (view == null && viewName == "Hex") requestOwner.also {
@@ -87,7 +95,8 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         } else null
         val hexTable = requestRegion?.let { visibleTables(it).single() }
         val ownerPaths = listOf(requestAnchorPath, responseAnchorPath, pathTo(requestOwner, selected.content),
-            pathTo(responseOwner, selected.content), pathTo(views, requestOwner), pathTo(responseViews, responseOwner)) +
+            pathTo(responseOwner, selected.content), pathTo(views, requestOwner)) +
+            (if (responseViews != null) listOf(pathTo(responseViews, responseOwner)) else emptyList()) +
             if (hexTable != null) listOf(pathTo(hexTable, requestOwner)) else emptyList()
         fun boundaryValid(): Boolean = ownerPaths.all(::pathValid) &&
             requestOwner.parent === separator && responseOwner.parent === separator &&
@@ -95,12 +104,18 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
             visibleWithin(labels.single(), selected.content) && visibleWithin(responseLabels.single(), selected.content) &&
             components(selected.content).filterIsInstance<JLabel>().filter { it.text == "Request" }.singleOrNull() === labels.single() &&
             components(selected.content).filterIsInstance<JLabel>().filter { it.text == "Response" }.singleOrNull() === responseLabels.single() &&
-            editorSelectors(requestOwner).singleOrNull() === views && editorSelectors(responseOwner).singleOrNull() === responseViews &&
+            editorSelectors(requestOwner).singleOrNull() === views && responseStateValid() &&
             !hasResponseOrInspector(requestOwner)
         fun regionValid(): Boolean = requestRegion != null && boundaryValid()
         fun tableValid() = requestRegion != null && hexTable != null && regionValid() &&
             visibleTables(requestRegion).singleOrNull() === hexTable
-        M0ContextTarget(tabId, viewName, describeSource = { source ->
+        M0ContextTarget(tabId, viewName, canMutateNow = {
+            check(SwingUtilities.isEventDispatchThread())
+            verifySelection(selected.identity)
+            val cancel = components(selected.content).filterIsInstance<AbstractButton>()
+                .filter { visibleWithin(it, selected.content) && it.text == "Cancel" }.toList()
+            cancel.size == 1 && !cancel.single().isEnabled
+        }, describeSource = { source ->
             check(SwingUtilities.isEventDispatchThread())
             var diagnosticException = false
             fun checkState(read: () -> Boolean): Boolean? = try { read() } catch (_: Exception) {
@@ -134,7 +149,8 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
                 requestRegion?.let { checkState { source === it || SwingUtilities.isDescendingFrom(source, it) } },
                 requestRegion?.let { visibleTables(it).size }, requestRegion?.let(::hasResponseOrInspector),
                 checkState(::boundaryValid), checkState { !SwingUtilities.isDescendingFrom(responseOwner, requestOwner) },
-                checkState { source === responseOwner || SwingUtilities.isDescendingFrom(source, responseOwner) })
+                checkState { source === responseOwner || SwingUtilities.isDescendingFrom(source, responseOwner) },
+                if (responseViews == null) "selector_absent" else "captured_response_selector")
         }) { source ->
             if (!SwingUtilities.isEventDispatchThread()) false
             else try {

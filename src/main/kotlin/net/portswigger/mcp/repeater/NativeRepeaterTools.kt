@@ -37,22 +37,33 @@ internal fun Server.registerNativeRepeaterTools(api: MontoyaApi, config: McpConf
 
     if (investigationMode) {
     val probeJson = Json { encodeDefaults = true }
-    mcpTool<RepeaterM0Probe>("M0 INVESTIGATION ONLY, not a supported MVP operation. Requires acknowledgement=M0_UNVERIFIED_NATIVE_MODEL. inspect returns bounded read-only control metadata with effective settings unverified. edit is an experimental guarded text-widget update requiring native Send proof. model_read waits up to 30s for a new native request-editor context menu on this exact tab, extracts public model byte metadata only, then deregisters; trigger the native context menu during the wait. It does not switch editor view or retain the model handle. Never sends or changes settings. Synthetic disposable M0 project only.") {
-        require(acknowledgement == "M0_UNVERIFIED_NATIVE_MODEL") { "Explicit M0 investigation acknowledgement required" }
-        require(action in setOf("inspect", "edit", "model_read")) { "action must be inspect, edit or model_read" }
+    mcpTool<RepeaterM0Probe>("M0 INVESTIGATION ONLY, not a supported MVP operation. inspect/edit/model_read require acknowledgement=M0_UNVERIFIED_NATIVE_MODEL. model_read observes public native request-model bytes during a new native request context menu within 30s. model_write_bytes requires acknowledgement=M0_BYTE_MODEL_WRITE, full expected model hash/service/version and explicit replacementRequestBase64; attempts one guarded public setRequest with exact readback. Base64 semantics are probe-only, not final editor_text. Exact tool/tab must already be selected. No retained handle, automatic context trigger, Send, rollback, retry or settings writes. Synthetic disposable M0 project only.") {
+        require(action in setOf("inspect", "edit", "model_read", "model_write_bytes")) { "Unsupported M0 action" }
+        val writing = action == "model_write_bytes"
+        require(acknowledgement == if (writing) "M0_BYTE_MODEL_WRITE" else "M0_UNVERIFIED_NATIVE_MODEL") { "Explicit M0 action acknowledgement required" }
         require((action == "edit") == (requestContent != null && expectedFingerprint != null)) {
             "edit requires requestContent and expectedFingerprint; inspect accepts neither"
         }
         if (action != "edit") require(requestContent == null && expectedFingerprint == null)
+        val writeFields = listOf(expectedModelRequestSha256, expectedTargetHostname, expectedTargetPort,
+            expectedUsesHttps, expectedModelHttpVersion, replacementRequestBase64)
+        require(if (writing) writeFields.all { it != null } else writeFields.all { it == null }) { "M0 byte-write fields must be complete and exclusive" }
+        val writePlan = if (writing) M0ByteWritePlan.parse(checkNotNull(expectedModelRequestSha256), checkNotNull(expectedTargetHostname),
+            checkNotNull(expectedTargetPort), checkNotNull(expectedUsesHttps), checkNotNull(expectedModelHttpVersion),
+            checkNotNull(replacementRequestBase64)) else null
         checkReadPermission()
+        val approvedRequire = config.requireDataAccessApproval
+        val approvedAlways = config.alwaysAllowRepeater
+        fun permissionStillValid() = !config.requireDataAccessApproval || config.alwaysAllowRepeater ||
+            (config.requireDataAccessApproval == approvedRequire && config.alwaysAllowRepeater == approvedAlways)
         operations.withLock {
             if (action == "edit") {
                 val snapshot = native.investigateEdit(tabId, checkNotNull(expectedFingerprint), checkNotNull(requestContent))
                 probeJson.encodeToString(RepeaterM0EditResult(snapshot.tabId, snapshot.fingerprint,
                     snapshot.targetHostname, snapshot.targetPort, snapshot.usesHttps))
-            } else if (action == "model_read") {
-                val observation = observeM0ContextModel(api, native, tabId)
-                checkReadPermission()
+            } else if (action == "model_read" || writing) {
+                val observation = observeM0ContextModel(api, native, tabId, writePlan, ::permissionStillValid)
+                if (!writing) checkReadPermission()
                 probeJson.encodeToString(observation)
             } else {
                 probeJson.encodeToString(RepeaterM0Inspection(native.investigateControls(tabId)))
@@ -198,7 +209,10 @@ internal data class RepeaterSendResult(
 @Serializable
 internal data class RepeaterM0Probe(
     val tabId: String, val action: String, val acknowledgement: String,
-    val expectedFingerprint: String? = null, val requestContent: String? = null
+    val expectedFingerprint: String? = null, val requestContent: String? = null,
+    val expectedModelRequestSha256: String? = null, val expectedTargetHostname: String? = null,
+    val expectedTargetPort: Int? = null, val expectedUsesHttps: Boolean? = null,
+    val expectedModelHttpVersion: String? = null, val replacementRequestBase64: String? = null
 )
 
 @Serializable

@@ -70,15 +70,48 @@ class NativeRepeaterTest {
                 "missing_request" -> fixture.header.components.filterIsInstance<JLabel>().single().text = "Other"
                 "hidden_request" -> fixture.header.components.filterIsInstance<JLabel>().single().isVisible = false
                 "duplicate_request" -> fixture.panel.add(JLabel("Request"))
-                "response_selector_missing" -> fixture.responseSelector.removeAll()
+                "response_selector_missing" -> fixture.responseRegion.remove(fixture.responseSelector)
                 "response_selector_hidden" -> fixture.responseSelector.isVisible = false
             }
-            val expectedFailure = if (scenario in setOf("multiple", "hidden_table", "response_selector_missing", "response_selector_hidden"))
+            val expectedFailure = if (scenario in setOf("multiple", "hidden_table"))
                 IllegalStateException::class.java else IllegalArgumentException::class.java
+            if (scenario == "response_selector_missing") {
+                val target = fixture.f.native.modelContextTarget(fixture.id)
+                SwingUtilities.invokeAndWait {
+                    assertTrue(target.ownsSource(fixture.table))
+                    assertEquals("selector_absent", checkNotNull(target.describeSource).invoke(fixture.table).responseOwnerState)
+                }
+                continue
+            }
             assertThrows(expectedFailure, { runBlocking {
                 fixture.f.native.modelContextTarget(fixture.id)
             } }, scenario)
             assertEquals(0, fixture.f.sends)
+        }
+    }
+
+    @Test
+    fun `selector-absent Response owner cannot learn a later selector or changed owner`() = runBlocking {
+        for (scenario in listOf("materialized", "hidden_selector", "response_replaced", "response_hidden")) {
+            val fixture = NullHexFixture().apply { prepare() }
+            fixture.responseRegion.remove(fixture.responseSelector)
+            val target = fixture.f.native.modelContextTarget(fixture.id)
+            SwingUtilities.invokeAndWait {
+                assertTrue(target.ownsSource(fixture.table))
+                when (scenario) {
+                    "materialized" -> fixture.responseRegion.add(fixture.responseSelector)
+                    "hidden_selector" -> {
+                        fixture.responseSelector.isVisible = false
+                        fixture.responseRegion.add(fixture.responseSelector)
+                    }
+                    "response_replaced" -> {
+                        fixture.panel.remove(fixture.responseRegion)
+                        fixture.panel.add(JPanel().apply { add(JLabel("Response")) })
+                    }
+                    "response_hidden" -> fixture.responseRegion.isVisible = false
+                }
+                assertFalse(target.ownsSource(fixture.table), scenario)
+            }
         }
     }
 
