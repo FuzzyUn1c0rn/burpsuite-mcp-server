@@ -14,6 +14,8 @@ class NativeRepeaterTest {
         val entry = f.native.tabs().single()
         val requestSource = JTextArea()
         val responseSource = JTextArea()
+        responseSource.name = "PRIVATE_COMPONENT_NAME"
+        responseSource.text = "PRIVATE_DOCUMENT"
         val views = JTabbedPane().apply {
             addTab("Pretty", JPanel())
             addTab("Raw", JPanel())
@@ -28,9 +30,20 @@ class NativeRepeaterTest {
         SwingUtilities.invokeAndWait {
             assertTrue(target.ownsSource(requestSource))
             assertFalse(target.ownsSource(responseSource))
+            val ownership = checkNotNull(target.describeSource).invoke(responseSource)
+            assertEquals(true, ownership.nativeTabPathIdentityValid)
+            assertEquals(true, ownership.viewIndexMatches)
+            assertEquals(true, ownership.viewComponentMatches)
+            assertEquals(true, ownership.viewTitleMatches)
+            assertEquals(true, ownership.eventSourceWithinTab)
+            assertEquals(false, ownership.eventSourceWithinRequestPane)
+            assertEquals(false, ownership.eventSourceWithinView)
+            assertTrue(ownership.eventSourceAncestorClasses.size <= 8)
+            assertFalse(ownership.toString().contains("PRIVATE_"))
             assertEquals(2, views.selectedIndex)
             views.selectedIndex = 1
             assertFalse(target.ownsSource(requestSource))
+            assertEquals(false, checkNotNull(target.describeSource).invoke(requestSource).viewIndexMatches)
         }
         assertEquals(0, f.sends)
     }

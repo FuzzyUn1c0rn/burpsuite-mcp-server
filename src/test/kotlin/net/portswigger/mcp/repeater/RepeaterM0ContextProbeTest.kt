@@ -15,6 +15,8 @@ import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import java.awt.event.MouseEvent
 import java.util.Optional
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import javax.swing.JTextArea
 import javax.swing.SwingUtilities
 
@@ -87,6 +89,20 @@ class RepeaterM0ContextProbeTest {
         }
     }
 
+    @Test fun `ownership diagnostic collection failure does not grant model access or expose exception`() = runBlocking {
+        val f = Fixture()
+        val target = M0ContextTarget("tab", "Hex", describeSource = { error("PRIVATE_DIAGNOSTIC") }) { false }
+        val probe = RepeaterM0ContextProbe(target, 1000)
+        f.invoke(probe)
+        val observed = probe.result.await()
+        assertEquals("OWNERSHIP_UNCONFIRMED", observed.reason)
+        assertNull(observed.ownership)
+        assertNull(observed.modelRequestSha256)
+        assertFalse(Json.encodeToString(observed).contains("PRIVATE_DIAGNOSTIC"))
+        verify(exactly = 0) { f.event.messageEditorRequestResponse() }
+        verify(exactly = 0) { f.editor.requestResponse() }
+    }
+
     @Test fun `identity changed during model extraction or excessive size cannot publish model metadata`() = runBlocking {
         for (scenario in listOf("changed", "large", "failure", "inconsistent")) {
             val f = Fixture()
@@ -115,9 +131,39 @@ class RepeaterM0ContextProbeTest {
         probe.close()
         f.invoke(probe)
         verify(exactly = 0) { f.event.messageEditorRequestResponse() }
+        val unrelatedOffThread = RepeaterM0ContextProbe(f.target, 1000)
+        assertTrue(unrelatedOffThread.provideMenuItems(f.event).isEmpty())
+        assertFalse(unrelatedOffThread.result.isCompleted)
+        unrelatedOffThread.close()
+        every { f.event.isFromTool(ToolType.REPEATER) } returns true
         val offThread = RepeaterM0ContextProbe(f.target, 1000)
         assertTrue(offThread.provideMenuItems(f.event).isEmpty())
         assertEquals("UNSUPPORTED_CALLBACK_THREAD", offThread.result.await().reason)
+        verify(exactly = 0) { f.editor.requestResponse() }
+    }
+
+    @Test fun `close while input accessor is blocked stops before later model access`() {
+        val f = Fixture()
+        val probe = RepeaterM0ContextProbe(f.target, 1000)
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        every { f.event.inputEvent() } answers {
+            entered.countDown()
+            check(release.await(5, TimeUnit.SECONDS))
+            MouseEvent(f.source, MouseEvent.MOUSE_RELEASED, 2000, 0, 1, 1, 1, true, MouseEvent.BUTTON3)
+        }
+        val worker = Thread { f.invoke(probe) }
+        worker.start()
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            probe.close() // Must not wait for the EDT/accessor.
+        } finally {
+            release.countDown()
+            worker.join(5000)
+        }
+        assertFalse(worker.isAlive)
+        assertTrue(probe.result.isCancelled)
+        verify(exactly = 0) { f.event.messageEditorRequestResponse() }
         verify(exactly = 0) { f.editor.requestResponse() }
     }
 

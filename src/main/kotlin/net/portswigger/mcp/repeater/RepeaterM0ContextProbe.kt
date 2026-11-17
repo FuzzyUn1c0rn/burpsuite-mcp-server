@@ -14,7 +14,9 @@ import javax.swing.SwingUtilities
 
 /** Identity validator is transient and released when the observation closes. */
 internal class M0ContextTarget(
-    val tabId: String, val view: String, val ownsSource: (Component) -> Boolean
+    val tabId: String, val view: String,
+    val describeSource: ((Component) -> M0ContextOwnership)? = null,
+    val ownsSource: (Component) -> Boolean
 )
 
 /** One callback-scoped, read-only public-model experiment. Never adds a menu item. */
@@ -27,26 +29,33 @@ internal class RepeaterM0ContextProbe(
     override fun provideMenuItems(event: ContextMenuEvent): List<Component> {
         val current = target ?: return emptyList()
         if (result.isCompleted) return emptyList()
-        fun reject(reason: String) {
-            if (target === current) result.complete(M0ContextModelObservation("rejected", reason, current.tabId, current.view))
+        fun reject(reason: String, ownership: M0ContextOwnership? = null) {
+            if (target === current) result.complete(M0ContextModelObservation("rejected", reason, current.tabId, current.view,
+                ownership = ownership))
         }
+        fun closed() = target !== current || result.isCompleted
         try {
+            if (!event.isFromTool(ToolType.REPEATER) || closed()) return emptyList()
             if (!SwingUtilities.isEventDispatchThread()) {
                 reject("UNSUPPORTED_CALLBACK_THREAD")
                 return emptyList()
             }
-            if (!event.isFromTool(ToolType.REPEATER)) return emptyList()
             val input = event.inputEvent()
+            if (closed()) return emptyList()
             if (input.`when` <= startedAtMillis) {
                 reject("EVENT_NOT_NEWER_THAN_OBSERVATION")
                 return emptyList()
             }
             val source = input.component
             if (!current.ownsSource(source)) {
-                reject("OWNERSHIP_UNCONFIRMED")
+                if (closed()) return emptyList()
+                val ownership = try { current.describeSource?.invoke(source) } catch (_: Exception) { null }
+                reject("OWNERSHIP_UNCONFIRMED", ownership)
                 return emptyList()
             }
+            if (closed()) return emptyList()
             val editor = event.messageEditorRequestResponse().orElse(null)
+            if (closed()) return emptyList()
             if (editor == null) {
                 reject("EDITOR_HANDLE_UNAVAILABLE")
                 return emptyList()
@@ -55,22 +64,32 @@ internal class RepeaterM0ContextProbe(
                 reject("NOT_REQUEST_EDITOR_CONTEXT")
                 return emptyList()
             }
+            if (closed()) return emptyList()
             // Do not retain event/editor/requestResponse/request or decode model bytes as text.
-            val request = editor.requestResponse().request()
+            val requestResponse = editor.requestResponse()
+            if (closed()) return emptyList()
+            val request = requestResponse.request()
+            if (closed()) return emptyList()
             val message = request.toByteArray()
+            if (closed()) return emptyList()
             val body = request.body()
+            if (closed()) return emptyList()
             if (message.length() !in 0..262_144 || body.length() !in 0..262_144) {
                 reject("MODEL_REQUEST_TOO_LARGE")
                 return emptyList()
             }
+            if (closed()) return emptyList()
             val messageBytes = message.bytes
+            if (closed()) return emptyList()
             val bodyBytes = body.bytes
+            if (closed()) return emptyList()
             val bodyOffset = request.bodyOffset()
             if (messageBytes.size > 262_144 || bodyBytes.size > 262_144 ||
                 bodyOffset !in 0..messageBytes.size || !messageBytes.copyOfRange(bodyOffset, messageBytes.size).contentEquals(bodyBytes)) {
                 reject("MODEL_BYTES_INCONSISTENT")
                 return emptyList()
             }
+            if (closed()) return emptyList()
             val service = request.httpService()
             val host = service.host()
             if (host.length !in 1..253 || service.port() !in 1..65535) {
@@ -83,6 +102,7 @@ internal class RepeaterM0ContextProbe(
             val observation = M0ContextModelObservation("observed", "CALLBACK_MODEL_METADATA_ONLY", current.tabId,
                 current.view, messageBytes.size, sha256(messageBytes), bodyBytes.size, sha256(bodyBytes),
                 host, service.port(), service.secure(), version)
+            if (closed()) return emptyList()
             if (!current.ownsSource(source)) reject("IDENTITY_CHANGED_DURING_MODEL_READ")
             else if (target === current) result.complete(observation)
         } catch (_: Exception) {
@@ -128,5 +148,18 @@ internal data class M0ContextModelObservation(
     val representation: String = "Montoya HttpRequest.toByteArray()/body().getBytes(); not wire capture",
     val handleLifetime: String = "callback_only; later lifetime untested",
     val modelWriteAttempted: Boolean = false,
-    val editorViewSwitchAttempted: Boolean = false
+    val editorViewSwitchAttempted: Boolean = false,
+    val ownership: M0ContextOwnership? = null
+)
+
+@Serializable
+internal data class M0ContextOwnership(
+    val nativeTabPathIdentityValid: Boolean?, val viewIndexMatches: Boolean?,
+    val viewComponentMatches: Boolean?, val viewTitleMatches: Boolean?, val viewPaneWithinTab: Boolean?,
+    val eventSourceEqualsView: Boolean?, val eventSourceWithinView: Boolean?,
+    val eventSourceWithinRequestPane: Boolean?, val eventSourceWithinTab: Boolean?,
+    val selectedViewWithinEventSource: Boolean?,
+    val eventSourceComponentClass: String, val eventSourcePublicKind: String,
+    val eventSourceAncestorClasses: List<String>, val selectedViewComponentClass: String?,
+    val requestPaneComponentClass: String, val diagnosticException: Boolean
 )

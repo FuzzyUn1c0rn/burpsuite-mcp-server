@@ -45,7 +45,35 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         val viewName = views.getTitleAt(viewIndex)
         require(viewName in setOf("Pretty", "Raw", "Hex")) { "Unsupported native request view" }
         val view = views.getComponentAt(viewIndex)
-        M0ContextTarget(tabId, viewName) { source ->
+        M0ContextTarget(tabId, viewName, describeSource = { source ->
+            check(SwingUtilities.isEventDispatchThread())
+            var diagnosticException = false
+            fun checkState(read: () -> Boolean): Boolean? = try { read() } catch (_: Exception) {
+                diagnosticException = true
+                null
+            }
+            val tabValid = try { verifySelection(selected.identity); true } catch (_: Exception) { false }
+            val indexMatches = checkState { views.selectedIndex == viewIndex }
+            val componentMatches = checkState { views.getComponentAt(viewIndex) === view }
+            val titleMatches = checkState { views.getTitleAt(viewIndex) == viewName }
+            val paneWithinTab = checkState { SwingUtilities.isDescendingFrom(views, selected.content) }
+            val sourceEquals = source === view
+            val sourceWithinView = checkState { view != null && SwingUtilities.isDescendingFrom(source, view) }
+            val sourceWithinPane = checkState { source === views || SwingUtilities.isDescendingFrom(source, views) }
+            val sourceWithinTab = checkState { source === selected.content || SwingUtilities.isDescendingFrom(source, selected.content) }
+            val viewWithinSource = checkState { view != null && (view === source || SwingUtilities.isDescendingFrom(view, source)) }
+            M0ContextOwnership(tabValid, indexMatches, componentMatches, titleMatches, paneWithinTab,
+                sourceEquals, sourceWithinView, sourceWithinPane, sourceWithinTab, viewWithinSource,
+                source.javaClass.name.take(160), when (source) {
+                    is javax.swing.JTable -> "JTable"
+                    is javax.swing.text.JTextComponent -> "JTextComponent"
+                    is JTabbedPane -> "JTabbedPane"
+                    is javax.swing.JComponent -> "JComponent"
+                    is Container -> "Container"
+                    else -> "Component"
+                }, generateSequence(source.parent) { it.parent }.take(8).map { it.javaClass.name.take(160) }.toList(),
+                view?.javaClass?.name?.take(160), views.javaClass.name.take(160), diagnosticException)
+        }) { source ->
             if (!SwingUtilities.isEventDispatchThread()) false
             else try {
                 verifySelection(selected.identity)
