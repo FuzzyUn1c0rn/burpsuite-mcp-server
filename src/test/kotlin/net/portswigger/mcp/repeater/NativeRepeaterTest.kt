@@ -8,6 +8,86 @@ import javax.swing.*
 
 class NativeRepeaterTest {
     @Test
+    fun `read edit and send refuse replaced header content or reparented pane after selection`() = runBlocking {
+        for (mutation in listOf("remove", "header", "content", "reparent")) {
+            for (action in listOf("read", "edit", "send")) {
+                val f = Fixture()
+                f.add("baseline")
+                val original = f.add("target")
+                val neighbor = f.add("neighbor")
+                val before = f.native.read(f.native.tabs()[1].tabId)
+                SwingUtilities.invokeAndWait {
+                    f.tabs.selectedIndex = 0
+                    var changed = false
+                    f.tabs.addChangeListener {
+                        if (!changed && f.tabs.selectedIndex == 1) {
+                            changed = true
+                            when (mutation) {
+                                "remove" -> f.tabs.removeTabAt(1)
+                                "header" -> f.tabs.setTabComponentAt(1, JLabel("replacement"))
+                                "content" -> f.tabs.setComponentAt(1, JPanel())
+                                "reparent" -> JPanel().add(f.tabs)
+                            }
+                        }
+                    }
+                }
+                assertThrows(IllegalArgumentException::class.java, { runBlocking {
+                    when (action) {
+                        "read" -> f.native.read(before.tabId)
+                        "edit" -> f.native.investigateEdit(before.tabId, before.fingerprint,
+                            before.request.replace("/one", "/WRONG-TAB"))
+                        "send" -> f.native.send(before.tabId, before.fingerprint)
+                    }
+                } }, "$mutation during $action")
+                assertEquals(before.request, original.text, "$mutation during $action mutated original")
+                assertEquals(before.request, neighbor.text, "$mutation during $action mutated neighbor")
+                assertEquals(0, f.sends, "$mutation during $action dispatched")
+            }
+        }
+    }
+
+    @Test
+    fun `tab removed by selection listener never redirects an edit to identical neighbor`() = runBlocking {
+        val f = Fixture()
+        f.add("baseline")
+        f.add("target")
+        val neighbor = f.add("neighbor")
+        val before = f.native.read(f.native.tabs()[1].tabId)
+        f.removeTargetOnSelection()
+        assertThrows(IllegalArgumentException::class.java) { runBlocking {
+            f.native.investigateEdit(before.tabId, before.fingerprint, before.request.replace("/one", "/WRONG-TAB"))
+        } }
+        assertEquals(before.request, neighbor.text)
+        assertEquals(0, f.sends)
+    }
+
+    @Test
+    fun `tab removed by selection listener never redirects send to identical neighbor`() = runBlocking {
+        val f = Fixture()
+        f.add("baseline")
+        f.add("target")
+        f.add("neighbor")
+        val before = f.native.read(f.native.tabs()[1].tabId)
+        f.removeTargetOnSelection()
+        assertThrows(IllegalArgumentException::class.java) { runBlocking {
+            f.native.send(before.tabId, before.fingerprint)
+        } }
+        assertEquals(0, f.sends)
+    }
+
+    @Test
+    fun `identity rechecked after beforeClick callback without sending neighbor`() = runBlocking {
+        val f = Fixture()
+        f.add("target")
+        f.add("neighbor")
+        val before = f.native.read(f.native.tabs().first().tabId)
+        assertThrows(IllegalArgumentException::class.java) { runBlocking {
+            f.native.send(before.tabId, before.fingerprint) { f.tabs.removeTabAt(0) }
+        } }
+        assertEquals(0, f.sends)
+    }
+
+    @Test
     fun `M0 edit changes only identified editor without sending or changing target`() = runBlocking {
         val f = Fixture()
         val other = f.add("same", "/baseline")
@@ -85,6 +165,18 @@ class NativeRepeaterTest {
         }
         val native = NativeRepeater { suite }
         var sends = 0
+        fun removeTargetOnSelection() {
+            SwingUtilities.invokeAndWait {
+                tabs.selectedIndex = 0
+                var removed = false
+                tabs.addChangeListener {
+                    if (!removed && tabs.selectedIndex == 1) {
+                        removed = true
+                        tabs.removeTabAt(1)
+                    }
+                }
+            }
+        }
         fun add(name: String, path: String = "/one", owner: JTabbedPane = tabs): JTextArea {
             val request = JTextArea("GET $path HTTP/1.1\r\nHost: example.test\r\n\r\n")
             val panel = JPanel().apply {

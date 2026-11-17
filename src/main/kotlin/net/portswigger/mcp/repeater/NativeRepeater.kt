@@ -42,6 +42,7 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
             val oldProtocol = before.request.lineSequence().first().substringAfterLast(" ").trim()
             val newProtocol = request.lineSequence().first().substringAfterLast(" ").trim()
             require(oldProtocol == newProtocol) { "Request-line protocol changes are outside this probe" }
+            verifySelection(selected.identity)
             editors.single().text = request
             val after = snapshot(selected)
             check(before.targetHostname == after.targetHostname && before.targetPort == after.targetPort &&
@@ -118,6 +119,7 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         if (buttons.size == 1 && sendLabels.isEmpty()) {
             require(buttons.single().isEnabled) { "Repeater Send is disabled." }
             beforeClick()
+            verifySelection(selected.identity)
             buttons.single().doClick(0)
         } else {
             require(buttons.isEmpty() && sendLabels.size == 1) {
@@ -133,6 +135,7 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
             val y = control.height / 2
             require(x > 0 && y > 0) { "Repeater Send control has no usable bounds." }
             beforeClick()
+            verifySelection(selected.identity)
             control.dispatchEvent(MouseEvent(control, MouseEvent.MOUSE_PRESSED, now,
                 InputEvent.BUTTON1_DOWN_MASK, x, y, 1, false, MouseEvent.BUTTON1))
             control.dispatchEvent(MouseEvent(control, MouseEvent.MOUSE_RELEASED, now + 1,
@@ -145,7 +148,23 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
     private data class Step(val pane: JTabbedPane, val header: Component)
     private data class WeakStep(val pane: WeakReference<JTabbedPane>, val header: WeakReference<Component>)
     private data class Entry(val description: RepeaterTab, val path: List<Step>)
-    private data class Selected(val description: RepeaterTab, val content: Component)
+    private data class SelectionIdentity(val pane: JTabbedPane, val header: Component, val content: Component)
+    private data class Selected(val description: RepeaterTab, val content: Component, val identity: List<SelectionIdentity>)
+
+    private fun verifySelection(identity: List<SelectionIdentity>) {
+        val frame = suiteFrame()
+        identity.forEach { selected ->
+            val pane = selected.pane
+            require(pane === frame || SwingUtilities.isDescendingFrom(pane, frame)) {
+                "Repeater tab detached or closed during selection; no neighboring tab may be used."
+            }
+            val index = (0 until pane.tabCount).singleOrNull { pane.getTabComponentAt(it) === selected.header }
+            require(index != null && pane.selectedIndex == index &&
+                pane.getComponentAt(index) === selected.content) {
+                "Repeater tab identity changed during selection; no neighboring tab may be used."
+            }
+        }
+    }
 
     private fun inventory(): List<Entry> {
         val roots = components(suiteFrame()).filterIsInstance<JTabbedPane>()
@@ -191,6 +210,7 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         var content: Component? = null
         val names = mutableListOf<String>()
         var flatGroups = false
+        val identity = mutableListOf<SelectionIdentity>()
         for (step in path) {
             val pane = step.pane.get()
                 ?: error("Repeater tab is closed. List tabs again; no request was sent.")
@@ -210,19 +230,27 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
             val index = (0 until pane.tabCount).singleOrNull {
                 pane.getTabComponentAt(it) === header
             } ?: error("Repeater tab changed while selecting it; no request was sent.")
-            require(pane.getComponentAt(index) != null) {
+            val expectedContent = pane.getComponentAt(index)
+            require(expectedContent != null) {
                 "This ID identifies a group header. List tabs and choose an ID with kind=request."
             }
             flatGroups = (0 until pane.tabCount).any { pane.getComponentAt(it) == null }
             pane.selectedIndex = index
-            names += pane.getTitleAt(index)
-            content = pane.getComponentAt(index)
+            identity += SelectionIdentity(pane, header, expectedContent)
+            // Selecting a tab synchronously invokes application ChangeListeners. They may
+            // close, replace or reorder tabs before this assignment returns.
+            verifySelection(identity)
+            val confirmedIndex = (0 until pane.tabCount).single { pane.getTabComponentAt(it) === header }
+            names += pane.getTitleAt(confirmedIndex)
+            content = expectedContent
         }
         // Selecting cached identities avoids cycling through other tabs and resetting Burp's pooled response editor.
-        return Selected(RepeaterTab(tabId, names.last(), if (flatGroups) null else names.dropLast(1), "request"), checkNotNull(content))
+        verifySelection(identity)
+        return Selected(RepeaterTab(tabId, names.last(), if (flatGroups) null else names.dropLast(1), "request"), checkNotNull(content), identity)
     }
 
     private fun snapshot(selected: Selected): RepeaterSnapshot {
+        verifySelection(selected.identity)
         val labels = components(selected.content).filterIsInstance<JLabel>()
             .filter { visibleWithin(it, selected.content) && it.text?.startsWith("Target: ") == true }.toList()
         require(labels.size == 1) { "Cannot uniquely read the HTTP target for this Repeater tab." }

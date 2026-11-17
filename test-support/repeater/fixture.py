@@ -42,9 +42,9 @@ class State:
                 stream.write(json.dumps(item) + '\n')
             return item
 
-    def reply(self, record, redirect_port):
+    def reply(self, record, redirect_port, wait_for_gate=True):
         path = record['path'].split('?', 1)[0]
-        if path == '/delay':
+        if path == '/delay' and wait_for_gate:
             self.gate.wait(300)
         if path == '/close':
             return None
@@ -121,6 +121,8 @@ class Target(socketserver.BaseRequestHandler):
             if len(lengths) > 1 or (lengths and not 0 <= lengths[0] <= 262144):
                 raise ValueError('invalid content length')
             body = stream.read(lengths[0]) if lengths else b''
+            if lengths and len(body) != lengths[0]:
+                raise ValueError(f'incomplete body: expected {lengths[0]} bytes, received {len(body)}')
             reply = self.complete(method, path, headers, body, protocol, alpn, raw_head)
             if reply is None:
                 return
@@ -136,12 +138,17 @@ class Target(socketserver.BaseRequestHandler):
         h2 = H2Connection(config=H2Configuration(client_side=False, header_encoding='utf-8'))
         h2.initiate_connection()
         conn.sendall(h2.data_to_send())
-        streams, pending = {}, {}
+        streams, pending, deferred = {}, {}, {}
+        # Poll only to release gated streams; never block unrelated streams on their gate.
+        conn.settimeout(0.1)
         while True:
-            data = conn.recv(65536)
-            if not data:
+            try:
+                data = conn.recv(65536)
+            except socket.timeout:
+                data = None
+            if data == b'':
                 return
-            for event in h2.receive_data(data):
+            for event in h2.receive_data(data) if data is not None else []:
                 if isinstance(event, RequestReceived):
                     streams[event.stream_id] = [event.headers, bytearray()]
                 elif isinstance(event, DataReceived):
@@ -152,13 +159,22 @@ class Target(socketserver.BaseRequestHandler):
                 elif isinstance(event, StreamEnded):
                     headers, body = streams.pop(event.stream_id)
                     pseudo = dict((k, v) for k, v in headers if k.startswith(':'))
-                    reply = self.complete(pseudo[':method'], pseudo[':path'], headers, bytes(body), 'HTTP/2', alpn)
-                    if reply is None:
-                        return
-                    status, response_headers, response_body = reply
-                    h2.send_headers(event.stream_id, [(':status', str(status))] + response_headers +
-                                    [('content-length', str(len(response_body)))])
-                    pending[event.stream_id] = response_body
+                    record = self.server.state.record(self.server.label, 'HTTP/2', alpn,
+                                                      pseudo[':method'], pseudo[':path'], headers, bytes(body))
+                    deferred[event.stream_id] = (record, time.monotonic() + 300)
+            for stream_id in list(deferred):
+                record, deadline = deferred[stream_id]
+                if (record['path'].split('?', 1)[0] == '/delay' and
+                        not self.server.state.gate.is_set() and time.monotonic() < deadline):
+                    continue
+                del deferred[stream_id]
+                reply = self.server.state.reply(record, self.server.redirect_port, wait_for_gate=False)
+                if reply is None:
+                    return
+                status, response_headers, response_body = reply
+                h2.send_headers(stream_id, [(':status', str(status))] + response_headers +
+                                [('content-length', str(len(response_body)))])
+                pending[stream_id] = response_body
             for stream_id in list(pending):
                 body = pending[stream_id]
                 while body and h2.local_flow_control_window(stream_id) > 0:
