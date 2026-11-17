@@ -208,6 +208,30 @@ class NativeRepeaterTest {
         assertFalse(controls.toString().contains("GET /one"))
     }
 
+    @Test
+    fun `M0 diagnostics expose only public accessibility states and known selected editor view`() = runBlocking {
+        val f = Fixture()
+        f.add("one")
+        val entry = f.native.tabs().single()
+        val panel = f.tabs.getComponentAt(0) as JPanel
+        val protocol = JToggleButton("HTTP/2").apply { isSelected = true }
+        val views = JTabbedPane().apply {
+            addTab("Pretty", JPanel())
+            addTab("Raw", JPanel())
+            selectedIndex = 1
+        }
+        panel.add(protocol)
+        panel.add(views)
+        val controls = f.native.investigateControls(entry.tabId)
+        val observed = controls.single { it.controlText == "HTTP/2" }
+        assertEquals(true, observed.selected)
+        assertTrue(observed.accessibleStates.orEmpty().any { it in setOf("selected", "checked") })
+        assertTrue(controls.any { it.selectedEditorView == "Raw" })
+        assertEquals(1, views.selectedIndex)
+        assertTrue(protocol.isSelected)
+        assertEquals(0, f.sends)
+    }
+
     private class Fixture {
         val tabs = JTabbedPane()
         val suite = JTabbedPane().apply {

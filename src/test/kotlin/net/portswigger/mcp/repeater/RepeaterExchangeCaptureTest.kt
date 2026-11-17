@@ -9,6 +9,39 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 
 class RepeaterExchangeCaptureTest {
+    @Test
+    fun `M0 body diagnostic failure does not interrupt exact capture or request pass through`() {
+        val probe = RepeaterM0CaptureProbe()
+        val capture = RepeaterExchangeCapture(expected, probe)
+        val outgoing = request(5)
+        every { outgoing.body() } throws IllegalStateException("must not expose diagnostic exception detail")
+        capture.arm()
+        capture.handleHttpRequestToBeSent(outgoing)
+        capture.handleHttpResponseReceived(response(5))
+        assertTrue(capture.result.isCompleted)
+        assertEquals(1, probe.snapshot().diagnosticFailures)
+        assertEquals(1, probe.snapshot().repeaterRequestCallbacks)
+        assertNull(probe.snapshot().sameServiceRequestSamples.single().montoyaBodyByteLength)
+        verify(exactly = 1) { RequestToBeSentAction.continueWith(outgoing, outgoing.annotations()) }
+    }
+
+    @Test
+    fun `M0 probe observes mismatched hook and response without attributing or changing traffic`() {
+        val probe = RepeaterM0CaptureProbe()
+        val capture = RepeaterExchangeCapture(expected, probe)
+        val changed = request(4, text = raw.replace("\r\n\r\n", "\r\nContent-Length: 0\r\n\r\n"))
+        every { changed.body().bytes } returns byteArrayOf()
+        val received = response(4)
+        capture.arm()
+        capture.handleHttpRequestToBeSent(changed)
+        capture.handleHttpResponseReceived(received)
+        assertFalse(capture.result.isCompleted)
+        assertFalse(probe.snapshot().sameServiceRequestSamples.single().canonicalRequestEqual)
+        assertEquals(4, probe.snapshot().responseSamples.single().messageId)
+        verify(exactly = 1) { RequestToBeSentAction.continueWith(changed, changed.annotations()) }
+        verify(exactly = 1) { ResponseReceivedAction.continueWith(received, received.annotations()) }
+    }
+
     private val raw = "GET /one HTTP/1.1\r\nHost: example.test\r\n\r\n"
     private val expected = RepeaterSnapshot("tab", "name", emptyList(), "example.test", 443, true, raw, null, "hash")
 

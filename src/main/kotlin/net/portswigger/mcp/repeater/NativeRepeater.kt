@@ -14,6 +14,8 @@ import java.lang.ref.WeakReference
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.WeakHashMap
+import java.util.Locale
+import javax.accessibility.AccessibleState
 import javax.swing.AbstractButton
 import javax.swing.JLabel
 import javax.swing.JTabbedPane
@@ -68,6 +70,13 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
                 (component as? JTextArea)?.isEditable,
                 (component as? JTabbedPane)?.let { pane ->
                     (0 until pane.tabCount).mapNotNull { pane.getTitleAt(it)?.takeIf(EDITOR_LABEL::matches) }.take(12)
+                },
+                component.accessibleContext?.accessibleRole?.toDisplayString(Locale.ENGLISH)?.take(80),
+                component.accessibleContext?.accessibleStateSet?.let { states ->
+                    ACCESSIBLE_STATES.filter { (_, state) -> states.contains(state) }.map { it.first }
+                },
+                (component as? JTabbedPane)?.let { pane ->
+                    pane.selectedIndex.takeIf { it >= 0 }?.let { pane.getTitleAt(it)?.takeIf(EDITOR_LABEL::matches) }
                 })
         }.take(200).toList()
     }
@@ -301,6 +310,13 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         generateSequence(component) { if (it === root) null else it.parent }.all { it.isVisible }
 
     companion object {
+        private val ACCESSIBLE_STATES = listOf(
+            "selected" to AccessibleState.SELECTED, "checked" to AccessibleState.CHECKED,
+            "active" to AccessibleState.ACTIVE, "enabled" to AccessibleState.ENABLED,
+            "visible" to AccessibleState.VISIBLE, "showing" to AccessibleState.SHOWING,
+            "editable" to AccessibleState.EDITABLE, "expanded" to AccessibleState.EXPANDED,
+            "collapsed" to AccessibleState.COLLAPSED, "indeterminate" to AccessibleState.INDETERMINATE
+        )
         private val CONTROL_LABEL = Regex("(?i)(Send|Cancel|Pretty|Raw|Hex|Request|Response|HTTP/1(?:\\.1)?|HTTP/2|Follow redirects|Never|Always|On-site only|In-scope only|Single request|Send group.*)")
         private val EDITOR_LABEL = Regex("(?i)(Pretty|Raw|Hex|Request|Response|Inspector)")
         private val REQUEST_LINE = Regex("\\A[^\\s]+ [^\\r\\n]+ HTTP/(?:1\\.[01]|2(?:\\.0)?)(?:\\r?\\n|$)")
@@ -310,7 +326,8 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
 @Serializable
 internal data class RepeaterControlProbe(
     val componentType: String, val controlText: String?, val visible: Boolean, val enabled: Boolean,
-    val selected: Boolean?, val editable: Boolean?, val editorViews: List<String>?
+    val selected: Boolean?, val editable: Boolean?, val editorViews: List<String>?,
+    val accessibleRole: String?, val accessibleStates: List<String>?, val selectedEditorView: String?
 )
 
 internal fun canonicalRequest(request: String): String {

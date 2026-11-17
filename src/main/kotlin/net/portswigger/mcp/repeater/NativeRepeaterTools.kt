@@ -28,13 +28,14 @@ import java.util.concurrent.atomic.AtomicInteger
 internal fun Server.registerNativeRepeaterTools(api: MontoyaApi, config: McpConfig) {
     val native = NativeRepeater { api.userInterface().swingUtils().suiteFrame() }
     val operations = Mutex()
+    val investigationMode = java.lang.Boolean.getBoolean("net.portswigger.mcp.repeater.m0")
     suspend fun checkReadPermission() {
         check(DataAccessSecurity.checkDataAccessPermission(DataAccessType.REPEATER, config)) {
             "Repeater data access denied by Burp Suite."
         }
     }
 
-    if (java.lang.Boolean.getBoolean("net.portswigger.mcp.repeater.m0")) {
+    if (investigationMode) {
     val probeJson = Json { encodeDefaults = true }
     mcpTool<RepeaterM0Probe>("M0 INVESTIGATION ONLY, not a supported MVP operation. Requires acknowledgement=M0_UNVERIFIED_NATIVE_MODEL. Inspect returns bounded read-only control metadata with all effective settings explicitly unverified. edit performs an experimental guarded text-widget update; fixture/native Send evidence is required to establish whether it updates Burp's model. Never sends or changes settings. Use only synthetic requests in the disposable M0 project.") {
         require(acknowledgement == "M0_UNVERIFIED_NATIVE_MODEL") { "Explicit M0 investigation acknowledgement required" }
@@ -81,7 +82,8 @@ internal fun Server.registerNativeRepeaterTools(api: MontoyaApi, config: McpConf
                 expected.targetHostname, expected.targetPort, config, expected.request, api
             )) { "Repeater send denied by Burp Suite." }
             currentCoroutineContext().ensureActive()
-            val capture = RepeaterExchangeCapture(expected)
+            val captureProbe = if (investigationMode) RepeaterM0CaptureProbe() else null
+            val capture = RepeaterExchangeCapture(expected, captureProbe)
             val registration = api.http().registerHttpHandler(capture)
             try {
                 native.send(tabId, expectedFingerprint) { capture.arm() }
@@ -98,10 +100,11 @@ internal fun Server.registerNativeRepeaterTools(api: MontoyaApi, config: McpConf
                     }
                     received
                 }
-                    ?: error("No matching Repeater response captured within ${timeout}ms. The native request may still be running or may have been modified by session rules. Inspect Burp before retrying; no retry was made.")
+                    ?: error("No matching Repeater response captured within ${timeout}ms. The native request may still be running or may have been modified by session rules. Inspect Burp before retrying; no retry was made." +
+                        (captureProbe?.let { " M0_CAPTURE_DIAGNOSTICS=" + Json.encodeToString(it.snapshot()) } ?: ""))
                 Json.encodeToString(RepeaterSendResult(
                     tabId, exchange.messageId, exchange.request, exchange.response.take(responseLimit),
-                    exchange.response.length > responseLimit
+                    exchange.response.length > responseLimit, captureProbe?.snapshot()
                 ))
             } finally {
                 registration.deregister()
@@ -111,7 +114,9 @@ internal fun Server.registerNativeRepeaterTools(api: MontoyaApi, config: McpConf
 }
 
 /** Observe one exact Repeater exchange. Pass all traffic through unchanged. */
-internal class RepeaterExchangeCapture(private val expected: RepeaterSnapshot) : HttpHandler {
+internal class RepeaterExchangeCapture(
+    private val expected: RepeaterSnapshot, private val probe: RepeaterM0CaptureProbe? = null
+) : HttpHandler {
     private val armed = AtomicBoolean(false)
     private val requestId = AtomicInteger(-1)
     val result = CompletableDeferred<CapturedRepeaterExchange>()
@@ -121,9 +126,27 @@ internal class RepeaterExchangeCapture(private val expected: RepeaterSnapshot) :
     override fun handleHttpRequestToBeSent(request: HttpRequestToBeSent): RequestToBeSentAction {
         if (armed.get() && request.toolSource().isFromTool(ToolType.REPEATER)) {
             val service = request.httpService()
-            if (service.host().equals(expected.targetHostname, ignoreCase = true) &&
-                service.port() == expected.targetPort && service.secure() == expected.usesHttps &&
-                canonicalRequest(request.toString()) == canonicalRequest(expected.request)) {
+            val sameService = service.host().equals(expected.targetHostname, ignoreCase = true) &&
+                service.port() == expected.targetPort && service.secure() == expected.usesHttps
+            val hookText = if (sameService) request.toString() else null
+            if (probe != null) {
+                var bodyBytes: ByteArray? = null
+                var messageVersion: String? = null
+                if (sameService) try {
+                    bodyBytes = request.body().bytes
+                    messageVersion = request.httpVersion()
+                } catch (_: Exception) {
+                    probe.failure()
+                }
+                try {
+                    probe.request(expected.request, hookText.orEmpty(), request.messageId(), sameService,
+                        bodyBytes, messageVersion)
+                } catch (_: Exception) {
+                    // Diagnostic failure must not change traffic or relax the exact matcher.
+                    probe.failure()
+                }
+            }
+            if (hookText != null && canonicalRequest(hookText) == canonicalRequest(expected.request)) {
                 requestId.compareAndSet(-1, request.messageId())
             }
         }
@@ -131,6 +154,7 @@ internal class RepeaterExchangeCapture(private val expected: RepeaterSnapshot) :
     }
 
     override fun handleHttpResponseReceived(response: HttpResponseReceived): ResponseReceivedAction {
+        if (armed.get() && response.toolSource().isFromTool(ToolType.REPEATER)) probe?.response(response.messageId())
         if (requestId.get() >= 0 && response.toolSource().isFromTool(ToolType.REPEATER) && response.messageId() == requestId.get()) {
             result.complete(CapturedRepeaterExchange(
                 response.messageId(), response.initiatingRequest().toString(), response.toString()
@@ -157,7 +181,8 @@ internal data class SendRepeaterTab(
 @Serializable
 internal data class RepeaterSendResult(
     val tabId: String, val messageId: Int, val request: String,
-    val response: String, val responseTruncated: Boolean
+    val response: String, val responseTruncated: Boolean,
+    val m0CaptureDiagnostics: M0CaptureDiagnostics? = null
 )
 
 @Serializable
