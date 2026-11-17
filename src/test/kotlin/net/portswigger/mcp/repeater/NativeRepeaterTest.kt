@@ -201,9 +201,11 @@ class NativeRepeaterTest {
         val entry = f.native.tabs().single()
         val panel = f.tabs.getComponentAt(0) as JPanel
         panel.add(JLabel("secret-token-value"))
+        panel.add(JLabel("Send group SECRET_SUFFIX"))
         val controls = f.native.investigateControls(entry.tabId)
         assertTrue(controls.any { it.controlText == "Send" })
         assertFalse(controls.toString().contains("secret-token-value"))
+        assertFalse(controls.toString().contains("SECRET_SUFFIX"))
         assertFalse(controls.toString().contains("example.test"))
         assertFalse(controls.toString().contains("GET /one"))
     }

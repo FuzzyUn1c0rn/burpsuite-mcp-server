@@ -10,6 +10,36 @@ import org.junit.jupiter.api.Test
 
 class RepeaterExchangeCaptureTest {
     @Test
+    fun `M0 unmatched response diagnostic failure is counted without interrupting pass through`() {
+        for (accessor in listOf("messageId", "toolSource")) {
+            val probe = RepeaterM0CaptureProbe()
+            val capture = RepeaterExchangeCapture(expected, probe)
+            val unrelated = response(99)
+            if (accessor == "messageId") every { unrelated.messageId() } throws IllegalStateException("diagnostic only")
+            else every { unrelated.toolSource() } throws IllegalStateException("diagnostic only")
+            capture.arm()
+            assertDoesNotThrow { capture.handleHttpResponseReceived(unrelated) }
+            assertEquals(1, probe.snapshot().diagnosticFailures)
+            assertFalse(capture.result.isCompleted)
+            verify(exactly = 1) { ResponseReceivedAction.continueWith(unrelated, unrelated.annotations()) }
+        }
+    }
+
+    @Test
+    fun `disabled M0 diagnostics do not access unmatched response tool or id`() {
+        val capture = RepeaterExchangeCapture(expected)
+        val unrelated = response(99)
+        every { unrelated.toolSource() } throws IllegalStateException("must short circuit")
+        every { unrelated.messageId() } throws IllegalStateException("must short circuit")
+        capture.arm()
+        assertDoesNotThrow { capture.handleHttpResponseReceived(unrelated) }
+        assertFalse(capture.result.isCompleted)
+        verify(exactly = 0) { unrelated.toolSource() }
+        verify(exactly = 0) { unrelated.messageId() }
+        verify(exactly = 1) { ResponseReceivedAction.continueWith(unrelated, unrelated.annotations()) }
+    }
+
+    @Test
     fun `M0 body diagnostic failure does not interrupt exact capture or request pass through`() {
         val probe = RepeaterM0CaptureProbe()
         val capture = RepeaterExchangeCapture(expected, probe)

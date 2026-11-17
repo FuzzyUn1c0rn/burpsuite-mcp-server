@@ -317,7 +317,7 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
             "editable" to AccessibleState.EDITABLE, "expanded" to AccessibleState.EXPANDED,
             "collapsed" to AccessibleState.COLLAPSED, "indeterminate" to AccessibleState.INDETERMINATE
         )
-        private val CONTROL_LABEL = Regex("(?i)(Send|Cancel|Pretty|Raw|Hex|Request|Response|HTTP/1(?:\\.1)?|HTTP/2|Follow redirects|Never|Always|On-site only|In-scope only|Single request|Send group.*)")
+        private val CONTROL_LABEL = Regex("(?i)(Send|Cancel|Pretty|Raw|Hex|Request|Response|HTTP/1(?:\\.1)?|HTTP/2|Follow redirects|Never|Always|On-site only|In-scope only|Single request|Send group)")
         private val EDITOR_LABEL = Regex("(?i)(Pretty|Raw|Hex|Request|Response|Inspector)")
         private val REQUEST_LINE = Regex("\\A[^\\s]+ [^\\r\\n]+ HTTP/(?:1\\.[01]|2(?:\\.0)?)(?:\\r?\\n|$)")
     }

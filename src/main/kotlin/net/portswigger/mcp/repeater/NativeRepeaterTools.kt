@@ -154,7 +154,13 @@ internal class RepeaterExchangeCapture(
     }
 
     override fun handleHttpResponseReceived(response: HttpResponseReceived): ResponseReceivedAction {
-        if (armed.get() && response.toolSource().isFromTool(ToolType.REPEATER)) probe?.response(response.messageId())
+        if (armed.get() && probe != null) {
+            try {
+                if (response.toolSource().isFromTool(ToolType.REPEATER)) probe.response(response.messageId())
+            } catch (_: Exception) {
+                probe.failure()
+            }
+        }
         if (requestId.get() >= 0 && response.toolSource().isFromTool(ToolType.REPEATER) && response.messageId() == requestId.get()) {
             result.complete(CapturedRepeaterExchange(
                 response.messageId(), response.initiatingRequest().toString(), response.toString()
