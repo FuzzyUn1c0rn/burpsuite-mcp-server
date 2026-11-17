@@ -4,6 +4,7 @@ import burp.api.montoya.MontoyaApi
 import burp.api.montoya.core.ToolType
 import burp.api.montoya.ui.contextmenu.ContextMenuEvent
 import burp.api.montoya.ui.contextmenu.ContextMenuItemsProvider
+import burp.api.montoya.ui.contextmenu.InvocationType
 import burp.api.montoya.ui.contextmenu.MessageEditorHttpRequestResponse.SelectionContext
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
@@ -29,9 +30,10 @@ internal class RepeaterM0ContextProbe(
     override fun provideMenuItems(event: ContextMenuEvent): List<Component> {
         val current = target ?: return emptyList()
         if (result.isCompleted) return emptyList()
+        var observedInvocation: String? = null
         fun reject(reason: String, ownership: M0ContextOwnership? = null) {
             if (target === current) result.complete(M0ContextModelObservation("rejected", reason, current.tabId, current.view,
-                ownership = ownership))
+                ownership = ownership, observedInvocationType = observedInvocation))
         }
         fun closed() = target !== current || result.isCompleted
         try {
@@ -47,6 +49,13 @@ internal class RepeaterM0ContextProbe(
                 return emptyList()
             }
             val source = input.component
+            val invocation = event.invocationType()
+            observedInvocation = invocation?.name
+            if (closed()) return emptyList()
+            if (invocation != InvocationType.MESSAGE_EDITOR_REQUEST) {
+                reject("NOT_REQUEST_EDITOR_INVOCATION")
+                return emptyList()
+            }
             if (!current.ownsSource(source)) {
                 if (closed()) return emptyList()
                 val ownership = try { current.describeSource?.invoke(source) } catch (_: Exception) { null }
@@ -101,7 +110,7 @@ internal class RepeaterM0ContextProbe(
             } ?: "unknown"
             val observation = M0ContextModelObservation("observed", "CALLBACK_MODEL_METADATA_ONLY", current.tabId,
                 current.view, messageBytes.size, sha256(messageBytes), bodyBytes.size, sha256(bodyBytes),
-                host, service.port(), service.secure(), version)
+                host, service.port(), service.secure(), version, observedInvocationType = observedInvocation)
             if (closed()) return emptyList()
             if (!current.ownsSource(source)) reject("IDENTITY_CHANGED_DURING_MODEL_READ")
             else if (target === current) result.complete(observation)
@@ -149,7 +158,8 @@ internal data class M0ContextModelObservation(
     val handleLifetime: String = "callback_only; later lifetime untested",
     val modelWriteAttempted: Boolean = false,
     val editorViewSwitchAttempted: Boolean = false,
-    val ownership: M0ContextOwnership? = null
+    val ownership: M0ContextOwnership? = null,
+    val observedInvocationType: String? = null
 )
 
 @Serializable
@@ -161,5 +171,11 @@ internal data class M0ContextOwnership(
     val selectedViewWithinEventSource: Boolean?,
     val eventSourceComponentClass: String, val eventSourcePublicKind: String,
     val eventSourceAncestorClasses: List<String>, val selectedViewComponentClass: String?,
-    val requestPaneComponentClass: String, val diagnosticException: Boolean
+    val requestPaneComponentClass: String, val diagnosticException: Boolean,
+    val bindingMode: String = "selected_page",
+    val requestRegionIdentityValid: Boolean? = null, val hexTableIdentityValid: Boolean? = null,
+    val eventSourceWithinCapturedHexTable: Boolean? = null, val eventSourceWithinRequestRegion: Boolean? = null,
+    val requestRegionVisibleTableCount: Int? = null, val requestRegionHasResponseOrInspector: Boolean? = null,
+    val requestResponseBoundaryValid: Boolean? = null, val responseOwnerOutsideRequest: Boolean? = null,
+    val eventSourceWithinResponseOwner: Boolean? = null
 )

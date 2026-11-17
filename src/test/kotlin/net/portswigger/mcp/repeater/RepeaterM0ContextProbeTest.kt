@@ -6,6 +6,7 @@ import burp.api.montoya.core.ToolType
 import burp.api.montoya.http.message.requests.HttpRequest
 import burp.api.montoya.ui.contextmenu.ContextMenuEvent
 import burp.api.montoya.ui.contextmenu.ContextMenuItemsProvider
+import burp.api.montoya.ui.contextmenu.InvocationType
 import burp.api.montoya.ui.contextmenu.MessageEditorHttpRequestResponse
 import io.mockk.*
 import kotlinx.coroutines.*
@@ -34,6 +35,7 @@ class RepeaterM0ContextProbeTest {
         val head = "POST /PRIVATE_PATH HTTP/2\r\nHost: example.test\r\n\r\n".toByteArray()
         init {
             every { event.isFromTool(ToolType.REPEATER) } returns true
+            every { event.invocationType() } returns InvocationType.MESSAGE_EDITOR_REQUEST
             every { event.inputEvent() } returns MouseEvent(source, MouseEvent.MOUSE_RELEASED, 2000, 0, 1, 1, 1, true, MouseEvent.BUTTON3)
             every { event.messageEditorRequestResponse() } returns Optional.of(editor)
             every { editor.selectionContext() } returns MessageEditorHttpRequestResponse.SelectionContext.REQUEST
@@ -74,13 +76,16 @@ class RepeaterM0ContextProbeTest {
     }
 
     @Test fun `wrong ownership response context and stale input are refused before model access`() = runBlocking {
-        for (scenario in listOf("ownership", "response", "stale", "missing")) {
+        for (scenario in listOf("ownership", "response", "stale", "missing", "viewer", "response_invocation", "table_invocation")) {
             val f = Fixture()
             val probe = RepeaterM0ContextProbe(f.target, if (scenario == "stale") 3000 else 1000)
             when (scenario) {
                 "ownership" -> f.owns = false
                 "response" -> every { f.editor.selectionContext() } returns MessageEditorHttpRequestResponse.SelectionContext.RESPONSE
                 "missing" -> every { f.event.messageEditorRequestResponse() } returns Optional.empty()
+                "viewer" -> every { f.event.invocationType() } returns InvocationType.MESSAGE_VIEWER_REQUEST
+                "response_invocation" -> every { f.event.invocationType() } returns InvocationType.MESSAGE_EDITOR_RESPONSE
+                "table_invocation" -> every { f.event.invocationType() } returns InvocationType.SITE_MAP_TABLE
             }
             f.invoke(probe)
             assertEquals("rejected", probe.result.await().status)

@@ -7,6 +7,129 @@ import java.awt.BorderLayout
 import javax.swing.*
 
 class NativeRepeaterTest {
+    private class NullHexFixture {
+        val f = Fixture()
+        val selector = JTabbedPane().apply {
+            addTab("Pretty", null)
+            addTab("Raw", null)
+            addTab("Hex", null)
+            selectedIndex = 2
+        }
+        val table = JTable(2, 2)
+        val tableHolder = JPanel().apply { add(table) }
+        val header = JPanel().apply { add(JLabel("Request")); add(selector) }
+        val region = JPanel(BorderLayout()).apply { add(header, BorderLayout.NORTH); add(tableHolder) }
+        val responseTable = JTable(2, 2)
+        val responseLabel = JLabel("Response")
+        val responseSelector = JTabbedPane().apply {
+            addTab("Pretty", null); addTab("Raw", null); addTab("Hex", null); selectedIndex = 2
+        }
+        val responseRegion = JPanel().apply { add(responseLabel); add(responseSelector); add(responseTable) }
+        lateinit var id: String
+        lateinit var panel: JPanel
+        suspend fun prepare() {
+            f.add("target")
+            id = f.native.tabs().single().tabId
+            panel = f.tabs.getComponentAt(0) as JPanel
+            panel.add(region)
+            panel.add(responseRegion)
+        }
+    }
+
+    @Test
+    fun `null-page Hex binds only the pre-captured unique Request table without selecting views`() = runBlocking {
+        val fixture = NullHexFixture().apply { prepare() }
+        val target = fixture.f.native.modelContextTarget(fixture.id)
+        SwingUtilities.invokeAndWait {
+            assertTrue(target.ownsSource(fixture.table))
+            assertFalse(target.ownsSource(fixture.responseTable))
+            val detail = checkNotNull(target.describeSource).invoke(fixture.table)
+            assertEquals("captured_request_hex_table", detail.bindingMode)
+            assertEquals(true, detail.requestRegionIdentityValid)
+            assertEquals(true, detail.hexTableIdentityValid)
+            assertEquals(true, detail.eventSourceWithinCapturedHexTable)
+            assertNull(detail.selectedViewComponentClass)
+            assertEquals(2, fixture.selector.selectedIndex)
+        }
+        assertEquals(0, fixture.f.sends)
+    }
+
+    @Test
+    fun `null-page Hex refuses multiple tables Response or Inspector regions before arming`() = runBlocking {
+        for (scenario in listOf("multiple", "response", "inspector", "missing_response", "hidden_response", "duplicate_response", "hidden_table",
+            "missing_request", "hidden_request", "duplicate_request", "response_selector_missing", "response_selector_hidden")) {
+            val fixture = NullHexFixture().apply { prepare() }
+            when (scenario) {
+                "multiple" -> fixture.tableHolder.add(JTable(1, 1))
+                "response" -> fixture.tableHolder.add(JLabel("Response"))
+                "inspector" -> fixture.tableHolder.add(JLabel("Inspector"))
+                "missing_response" -> fixture.responseLabel.text = "Other"
+                "hidden_response" -> fixture.responseRegion.isVisible = false
+                "duplicate_response" -> fixture.panel.add(JLabel("Response"))
+                "hidden_table" -> fixture.table.isVisible = false
+                "missing_request" -> fixture.header.components.filterIsInstance<JLabel>().single().text = "Other"
+                "hidden_request" -> fixture.header.components.filterIsInstance<JLabel>().single().isVisible = false
+                "duplicate_request" -> fixture.panel.add(JLabel("Request"))
+                "response_selector_missing" -> fixture.responseSelector.removeAll()
+                "response_selector_hidden" -> fixture.responseSelector.isVisible = false
+            }
+            val expectedFailure = if (scenario in setOf("multiple", "hidden_table", "response_selector_missing", "response_selector_hidden"))
+                IllegalStateException::class.java else IllegalArgumentException::class.java
+            assertThrows(expectedFailure, { runBlocking {
+                fixture.f.native.modelContextTarget(fixture.id)
+            } }, scenario)
+            assertEquals(0, fixture.f.sends)
+        }
+    }
+
+    @Test
+    fun `captured Hex owner rejects region table selector or label replacement and reparenting`() = runBlocking {
+        for (scenario in listOf("region_reparent", "table_reparent", "table_replace", "selector_replace", "label", "extra_table",
+            "response_reparent", "response_hidden", "response_replace")) {
+            val fixture = NullHexFixture().apply { prepare() }
+            val target = fixture.f.native.modelContextTarget(fixture.id)
+            SwingUtilities.invokeAndWait {
+                when (scenario) {
+                    "region_reparent" -> fixture.panel.add(JPanel().apply { add(fixture.region) })
+                    "table_reparent" -> fixture.region.add(JPanel().apply { add(fixture.table) }, BorderLayout.SOUTH)
+                    "table_replace" -> { fixture.tableHolder.remove(fixture.table); fixture.tableHolder.add(JTable(2, 2)) }
+                    "selector_replace" -> { fixture.header.remove(fixture.selector); fixture.header.add(JTabbedPane()) }
+                    "label" -> fixture.header.components.filterIsInstance<JLabel>().single().text = "Other"
+                    "extra_table" -> fixture.tableHolder.add(JTable(1, 1))
+                    "response_reparent" -> fixture.panel.add(JPanel().apply { add(fixture.responseRegion) })
+                    "response_hidden" -> fixture.responseRegion.isVisible = false
+                    "response_replace" -> {
+                        fixture.responseRegion.remove(fixture.responseLabel)
+                        fixture.responseRegion.add(JLabel("Response"))
+                    }
+                }
+                assertFalse(target.ownsSource(fixture.table), scenario)
+                assertFalse(target.ownsSource(fixture.responseTable), scenario)
+            }
+            assertEquals(0, fixture.f.sends)
+        }
+    }
+
+    @Test
+    fun `model context requires already-selected native tool and tab without activating either`() = runBlocking {
+        val fixture = NullHexFixture().apply { prepare() }
+        fixture.f.add("neighbor")
+        for (scenario in listOf("suite", "leaf")) {
+            SwingUtilities.invokeAndWait {
+                fixture.f.suite.selectedIndex = if (scenario == "suite") 0 else 1
+                fixture.f.tabs.selectedIndex = if (scenario == "leaf") 1 else 0
+            }
+            val suiteIndex = fixture.f.suite.selectedIndex
+            val tabIndex = fixture.f.tabs.selectedIndex
+            assertThrows(IllegalArgumentException::class.java) { runBlocking {
+                fixture.f.native.modelContextTarget(fixture.id)
+            } }
+            assertEquals(suiteIndex, fixture.f.suite.selectedIndex)
+            assertEquals(tabIndex, fixture.f.tabs.selectedIndex)
+        }
+        assertEquals(0, fixture.f.sends)
+    }
+
     @Test
     fun `model context target binds exact request view and never response or switched views`() = runBlocking {
         val f = Fixture()
@@ -24,7 +147,10 @@ class NativeRepeaterTest {
         }
         val panel = f.tabs.getComponentAt(0) as JPanel
         panel.add(JPanel(BorderLayout()).apply { add(JLabel("Request"), BorderLayout.NORTH); add(views) })
-        panel.add(JPanel(BorderLayout()).apply { add(JLabel("Response"), BorderLayout.NORTH); add(responseSource) })
+        val responseViews = JTabbedPane().apply {
+            addTab("Pretty", JPanel()); addTab("Raw", responseSource); addTab("Hex", JPanel()); selectedIndex = 1
+        }
+        panel.add(JPanel(BorderLayout()).apply { add(JLabel("Response"), BorderLayout.NORTH); add(responseViews) })
         val target = f.native.modelContextTarget(entry.tabId)
         assertEquals("Hex", target.view)
         SwingUtilities.invokeAndWait {

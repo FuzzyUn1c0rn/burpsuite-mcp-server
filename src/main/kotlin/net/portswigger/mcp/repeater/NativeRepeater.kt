@@ -20,6 +20,7 @@ import javax.swing.AbstractButton
 import javax.swing.JLabel
 import javax.swing.JTabbedPane
 import javax.swing.JTextArea
+import javax.swing.JTable
 import javax.swing.SwingUtilities
 
 /** Experimental adapter: only public Swing types, no reflection into Burp's obfuscated classes. */
@@ -29,10 +30,15 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
 
     /** Read-only M0 context experiment: never switches Pretty/Raw/Hex. */
     suspend fun modelContextTarget(tabId: String): M0ContextTarget = withContext(Dispatchers.Swing) {
-        val selected = select(tabId)
+        // This investigation requires the target already selected. Do not materialize
+        // a different tab/view before capturing its editor-owner identities.
+        val selected = select(tabId, activate = false)
         val labels = components(selected.content).filterIsInstance<JLabel>()
-            .filter { visibleWithin(it, selected.content) && it.text == "Request" }.toList()
-        require(labels.size == 1) { "Cannot uniquely identify the native request editor label" }
+            .filter { it.text == "Request" }.toList()
+        val responseLabels = components(selected.content).filterIsInstance<JLabel>()
+            .filter { it.text == "Response" }.toList()
+        require(labels.size == 1 && visibleWithin(labels.single(), selected.content)) { "Cannot uniquely identify a visible Request anchor" }
+        require(responseLabels.size == 1 && visibleWithin(responseLabels.single(), selected.content)) { "Cannot uniquely identify a visible Response anchor" }
         val candidates = generateSequence(labels.single().parent) { if (it === selected.content) null else it.parent }
             .map { ancestor -> components(ancestor).filterIsInstance<JTabbedPane>()
                 .filter { pane -> visibleWithin(pane, selected.content) &&
@@ -45,6 +51,55 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         val viewName = views.getTitleAt(viewIndex)
         require(viewName in setOf("Pretty", "Raw", "Hex")) { "Unsupported native request view" }
         val view = views.getComponentAt(viewIndex)
+        fun editorSelectors(root: Component) = components(root).filterIsInstance<JTabbedPane>().filter { pane ->
+            visibleWithin(pane, selected.content) &&
+                (0 until pane.tabCount).map(pane::getTitleAt).containsAll(listOf("Pretty", "Raw", "Hex"))
+        }.toList()
+        fun hasResponseOrInspector(root: Component) = components(root).any { component ->
+            (component is JLabel && component.text in setOf("Response", "Inspector")) ||
+                (component is JTabbedPane && (0 until component.tabCount).any { component.getTitleAt(it) == "Inspector" })
+        }
+        fun visibleTables(root: Component) = components(root).filterIsInstance<JTable>()
+            .filter { visibleWithin(it, selected.content) }.toList()
+        fun pathTo(component: Component, root: Component): List<Component> {
+            val path = generateSequence(component) { if (it === root) null else it.parent }.toList()
+            require(path.lastOrNull() === root) { "Native editor owner is not in the captured tab" }
+            return path
+        }
+        fun pathValid(path: List<Component>) = path.zipWithNext().all { (child, parent) -> child.parent === parent }
+        val requestAnchorPath = pathTo(labels.single(), selected.content)
+        val responseAnchorPath = pathTo(responseLabels.single(), selected.content)
+        val separator = requestAnchorPath.first { candidate -> responseAnchorPath.any { it === candidate } }
+        val requestOwner = requestAnchorPath.getOrNull(requestAnchorPath.indexOfFirst { it === separator } - 1)
+            ?: error("Request anchor has no distinct editor-side owner")
+        val responseOwner = responseAnchorPath.getOrNull(responseAnchorPath.indexOfFirst { it === separator } - 1)
+            ?: error("Response anchor has no distinct editor-side owner")
+        require(requestOwner !== responseOwner && requestOwner !== selected.content &&
+            editorSelectors(requestOwner).singleOrNull() === views && !hasResponseOrInspector(requestOwner)) {
+            "Cannot prove distinct Request and Response editor owners"
+        }
+        val responseViews = editorSelectors(responseOwner).singleOrNull()
+            ?: error("Cannot positively bind the separate Response editor selector")
+        // Burp may use null-page tabs only as selectors. Bind the Hex table through
+        // a separately captured narrow Request region, never the whole leaf tab.
+        val requestRegion = if (view == null && viewName == "Hex") requestOwner.also {
+            check(visibleTables(it).size == 1) { "Cannot uniquely bind a Request-only Hex table owner" }
+        } else null
+        val hexTable = requestRegion?.let { visibleTables(it).single() }
+        val ownerPaths = listOf(requestAnchorPath, responseAnchorPath, pathTo(requestOwner, selected.content),
+            pathTo(responseOwner, selected.content), pathTo(views, requestOwner), pathTo(responseViews, responseOwner)) +
+            if (hexTable != null) listOf(pathTo(hexTable, requestOwner)) else emptyList()
+        fun boundaryValid(): Boolean = ownerPaths.all(::pathValid) &&
+            requestOwner.parent === separator && responseOwner.parent === separator &&
+            labels.single().text == "Request" && responseLabels.single().text == "Response" &&
+            visibleWithin(labels.single(), selected.content) && visibleWithin(responseLabels.single(), selected.content) &&
+            components(selected.content).filterIsInstance<JLabel>().filter { it.text == "Request" }.singleOrNull() === labels.single() &&
+            components(selected.content).filterIsInstance<JLabel>().filter { it.text == "Response" }.singleOrNull() === responseLabels.single() &&
+            editorSelectors(requestOwner).singleOrNull() === views && editorSelectors(responseOwner).singleOrNull() === responseViews &&
+            !hasResponseOrInspector(requestOwner)
+        fun regionValid(): Boolean = requestRegion != null && boundaryValid()
+        fun tableValid() = requestRegion != null && hexTable != null && regionValid() &&
+            visibleTables(requestRegion).singleOrNull() === hexTable
         M0ContextTarget(tabId, viewName, describeSource = { source ->
             check(SwingUtilities.isEventDispatchThread())
             var diagnosticException = false
@@ -72,15 +127,26 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
                     is Container -> "Container"
                     else -> "Component"
                 }, generateSequence(source.parent) { it.parent }.take(8).map { it.javaClass.name.take(160) }.toList(),
-                view?.javaClass?.name?.take(160), views.javaClass.name.take(160), diagnosticException)
+                view?.javaClass?.name?.take(160), views.javaClass.name.take(160), diagnosticException,
+                if (requestRegion == null) "selected_page" else "captured_request_hex_table",
+                requestRegion?.let { checkState(::regionValid) }, hexTable?.let { checkState(::tableValid) },
+                hexTable?.let { checkState { source === it || SwingUtilities.isDescendingFrom(source, it) } },
+                requestRegion?.let { checkState { source === it || SwingUtilities.isDescendingFrom(source, it) } },
+                requestRegion?.let { visibleTables(it).size }, requestRegion?.let(::hasResponseOrInspector),
+                checkState(::boundaryValid), checkState { !SwingUtilities.isDescendingFrom(responseOwner, requestOwner) },
+                checkState { source === responseOwner || SwingUtilities.isDescendingFrom(source, responseOwner) })
         }) { source ->
             if (!SwingUtilities.isEventDispatchThread()) false
             else try {
                 verifySelection(selected.identity)
                 views.selectedIndex == viewIndex && views.getComponentAt(viewIndex) === view &&
                     views.getTitleAt(viewIndex) == viewName &&
-                    SwingUtilities.isDescendingFrom(views, selected.content) &&
-                    (source === view || SwingUtilities.isDescendingFrom(source, view))
+                    SwingUtilities.isDescendingFrom(views, selected.content) && boundaryValid() &&
+                    if (requestRegion != null && hexTable != null) {
+                        tableValid() && (source === hexTable || SwingUtilities.isDescendingFrom(source, hexTable))
+                    } else {
+                        source === view || SwingUtilities.isDescendingFrom(source, view)
+                    }
             } catch (_: Exception) { false }
         }
     }
@@ -275,7 +341,7 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         return result
     }
 
-    private fun select(tabId: String): Selected {
+    private fun select(tabId: String, activate: Boolean = true): Selected {
         val path = paths[tabId]
             ?: error("Repeater tab ID is unknown or closed. List tabs again; no request was sent.")
         val frame = suiteFrame()
@@ -311,12 +377,14 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
                         val page = owner.getComponentAt(it)
                         page === pane || SwingUtilities.isDescendingFrom(pane, page)
                     } ?: error("Repeater ancestor changed while selecting it; no request was sent.")
-                    owner.selectedIndex = ownerIndex
+                    if (activate) owner.selectedIndex = ownerIndex
+                    else require(owner.selectedIndex == ownerIndex) { "Model context probe requires the exact tab already selected" }
                     verifySelection(identity, requireSelected = false)
                 }
             val index = (0 until pane.tabCount).single { pane.getTabComponentAt(it) === header }
             flatGroups = (0 until pane.tabCount).any { pane.getComponentAt(it) == null }
-            pane.selectedIndex = index
+            if (activate) pane.selectedIndex = index
+            else require(pane.selectedIndex == index) { "Model context probe requires the exact tab already selected" }
             // Selecting a tab synchronously invokes application ChangeListeners. They may
             // close, replace or reorder tabs before this assignment returns.
             verifySelection(identity, requireSelected = false)
