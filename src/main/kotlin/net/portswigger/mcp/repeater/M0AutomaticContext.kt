@@ -37,6 +37,8 @@ internal class M0AutomaticContext(
     @Volatile private var issued = false
     @Volatile private var observed = false
     @Volatile private var dispatched = 0
+    @Volatile private var dispatchActive = false
+    @Volatile private var dispatchExited = false
     @Volatile private var popupObserved = false
     @Volatile private var popupOwned = false
     @Volatile private var cleanupConfirmed = false
@@ -45,7 +47,7 @@ internal class M0AutomaticContext(
     fun accept(event: InputEvent): Boolean {
         check(SwingUtilities.isEventDispatchThread())
         val current = state.get()
-        if (current !is State.Issued || !current.matches(event) || !state.compareAndSet(current, State.Observed)) {
+        if (!dispatchActive || current !is State.Issued || !current.matches(event) || !state.compareAndSet(current, State.Observed)) {
             ignored.updateAndGet { minOf(it + 1, 1000) }
             return false
         }
@@ -78,19 +80,32 @@ internal class M0AutomaticContext(
         if (owns?.invoke(table) != true || permitted?.invoke() != true || state.get() !== token)
             return reject("CLOSED_OR_CHANGED_BEFORE_DISPATCH")
         dispatched = 1
+        var dispatchFailed = false
+        dispatchActive = true
         try { ui.dispatch(table, event) } catch (_: Exception) {
-            try { cleanup(table, cleanupOwnership) } catch (_: Exception) { /* no broad cleanup fallback */ }
-            reason = "PUBLIC_EVENT_DISPATCH_FAILED"
-            return false
+            dispatchFailed = true
+        } finally {
+            // The supported native lifecycle is synchronous. A queued exact-token
+            // callback must never read after popup accounting has already run.
+            dispatchActive = false
+            dispatchExited = true
+            state.set(State.Closed)
         }
-        return try { cleanup(table, cleanupOwnership) } catch (_: Exception) {
+        val cleaned = try { cleanup(table, cleanupOwnership) } catch (_: Exception) {
             reason = "POPUP_CLEANUP_FAILED"; false
         }
+        if (dispatchFailed) { reason = "PUBLIC_EVENT_DISPATCH_FAILED"; return false }
+        return cleaned
     }
 
     private fun cleanup(table: JTable, cleanupOwnership: (Component) -> Boolean): Boolean {
         val path = ui.menuPath()
-        if (path.isEmpty()) { cleanupConfirmed = true; reason = "DISPATCH_RETURNED_NO_MENU"; return true }
+        if (path.isEmpty()) {
+            // Empty now does not prove the native popup will never materialize.
+            cleanupConfirmed = false
+            reason = "NO_SYNCHRONOUS_OWNED_POPUP"
+            return false
+        }
         popupObserved = true
         val popup = path.firstOrNull()?.component as? JPopupMenu
         popupOwned = observed && popup?.invoker === table && path.all { element ->
@@ -125,7 +140,7 @@ internal class M0AutomaticContext(
     }
 
     fun diagnostics() = M0AutomaticContextObservation(issued, dispatched, observed, ignored.get(),
-        popupObserved, popupOwned, cleanupConfirmed, reason)
+        popupObserved, popupOwned, cleanupConfirmed, reason, dispatchExited)
 }
 
 /** Public APIs in production; injectable only for deterministic headless component checks. */
@@ -141,5 +156,5 @@ internal class M0AutomaticContextUi(
 internal data class M0AutomaticContextObservation(
     val eventIssued: Boolean, val dispatchCount: Int, val exactIssuedEventObserved: Boolean,
     val ignoredEventCountCapped: Int, val popupObserved: Boolean, val popupInvokerOwned: Boolean,
-    val popupCleanupConfirmed: Boolean, val reason: String
+    val popupCleanupConfirmed: Boolean, val reason: String, val dispatchExited: Boolean = false
 )

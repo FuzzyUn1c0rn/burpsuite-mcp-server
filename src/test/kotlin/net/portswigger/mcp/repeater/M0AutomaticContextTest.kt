@@ -52,6 +52,7 @@ class M0AutomaticContextTest {
                 assertTrue(lease.accept(issued))
                 assertFalse(lease.accept(issued))
                 assertFalse(lease.dispatchOnce())
+                f.path = arrayOf(f.popup())
             }
             assertTrue(lease.dispatchOnce())
             assertEquals(1, f.dispatches)
@@ -66,11 +67,14 @@ class M0AutomaticContextTest {
     @Test fun `public component dispatch delivers single release to exact headless component`() {
         SwingUtilities.invokeAndWait {
             val f = UiFixture()
+            var path = emptyArray<MenuElement>()
             val lease = M0AutomaticContext(f.table, { it === f.table }, { true },
-                M0AutomaticContextUi(showing = { true }))
+                M0AutomaticContextUi(showing = { true }, menuPath = { path }, clearPath = { path = emptyArray() }))
             var calls = 0
             f.table.addMouseListener(object : java.awt.event.MouseAdapter() {
-                override fun mouseReleased(event: MouseEvent) { calls++; assertTrue(lease.accept(event)) }
+                override fun mouseReleased(event: MouseEvent) {
+                    calls++; assertTrue(lease.accept(event)); path = arrayOf(f.popup())
+                }
             })
             assertTrue(lease.dispatchOnce())
             assertEquals(1, calls)
@@ -87,7 +91,7 @@ class M0AutomaticContextTest {
                     if (scenario == "source") event.source = JTable() else event.translatePoint(1, 0)
                     assertFalse(lease.accept(event), scenario)
                 }
-                assertTrue(lease.dispatchOnce()) // No popup; absence of callback is reported separately.
+                assertFalse(lease.dispatchOnce())
                 assertFalse(lease.diagnostics().exactIssuedEventObserved)
                 assertEquals(1, f.dispatches)
                 lease.close()
@@ -196,6 +200,7 @@ class M0AutomaticContextTest {
                 every { event.inputEvent() } returns issued
                 assertTrue(provider.provideMenuItems(event).isEmpty())
                 assertTrue(provider.provideMenuItems(event).isEmpty())
+                f.path = arrayOf(f.popup())
             }
         }
         suspend fun run(deadline: Long = 1000) = observeM0ContextModel(api, native, "tab",
@@ -364,5 +369,66 @@ class M0AutomaticContextTest {
         verify(exactly = 0) { f.editor.setRequest(any()) }
         verify(exactly = 0) { f.request.bodyOffset() }
         verify(exactly = 0) { f.request.httpService() }
+    }
+
+    @Test fun `R9 exact issued token is revoked when public dispatch exits without callback`() {
+        SwingUtilities.invokeAndWait {
+            val f = UiFixture()
+            val lease = f.lease()
+            var issued: MouseEvent? = null
+            f.onDispatch = { issued = it }
+            assertFalse(lease.dispatchOnce())
+            assertTrue(lease.diagnostics().dispatchExited)
+            assertFalse(lease.diagnostics().popupCleanupConfirmed)
+            assertFalse(lease.accept(checkNotNull(issued)))
+            assertFalse(lease.diagnostics().exactIssuedEventObserved)
+            assertEquals(1, f.dispatches)
+            assertEquals(0, f.hides + f.clears)
+            lease.close()
+        }
+    }
+
+    @Test fun `R9 deferred exact native callback cannot read model or claim popup cleanup`() = runBlocking {
+        val f = ModelFixture()
+        f.f.onDispatch = { issued -> SwingUtilities.invokeLater {
+            every { f.event.inputEvent() } returns issued
+            f.provider.provideMenuItems(f.event)
+            f.f.path = arrayOf(f.f.popup()) // Simulated native deferred popup.
+        } }
+        val observed = f.run()
+        assertEquals("rejected", observed.status)
+        assertNull(observed.modelRequestSha256)
+        assertFalse(checkNotNull(observed.automaticContext).popupCleanupConfirmed)
+        assertTrue(observed.automaticContext.dispatchExited)
+        SwingUtilities.invokeAndWait { } // Drain the deliberately queued callback.
+        verify(exactly = 0) { f.editor.requestResponse() }
+        verify(exactly = 0) { f.editor.setRequest(any()) }
+        assertEquals(1, f.f.dispatches)
+        assertEquals(0, f.f.hides + f.f.clears)
+        assertTrue(f.f.path.isNotEmpty())
+    }
+
+    @Test fun `R9 synchronous callback with absent or deferred popup cannot report cleanup confirmed`() = runBlocking {
+        for (deferredPopup in listOf(false, true)) {
+            val f = ModelFixture()
+            val callback = f.f.onDispatch
+            f.f.onDispatch = { event ->
+                callback(event); f.f.path = emptyArray()
+                if (deferredPopup) SwingUtilities.invokeLater { f.f.path = arrayOf(f.f.popup()) }
+            }
+            val observed = f.run()
+            assertEquals("rejected", observed.status)
+            assertNull(observed.modelRequestSha256)
+            val auto = checkNotNull(observed.automaticContext)
+            assertTrue(auto.exactIssuedEventObserved)
+            assertTrue(auto.dispatchExited)
+            assertFalse(auto.popupObserved || auto.popupCleanupConfirmed)
+            assertEquals("NO_SYNCHRONOUS_OWNED_POPUP", auto.reason)
+            SwingUtilities.invokeAndWait { }
+            if (deferredPopup) assertTrue(f.f.path.isNotEmpty())
+            assertEquals(0, f.f.hides + f.f.clears)
+            verify(exactly = 0) { f.editor.setRequest(any()) }
+            assertEquals(1, f.f.dispatches)
+        }
     }
 }
