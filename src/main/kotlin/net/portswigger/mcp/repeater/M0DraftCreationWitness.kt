@@ -5,14 +5,16 @@ import javax.swing.JTabbedPane
 
 internal data class M0DraftObservation(val caption: String, val header: Component, val content: Component?)
 
-internal data class M0DraftInventory(
+internal class M0DraftInventory(
+    val source: Any,
+    val sequence: Long,
     val frame: Component,
     val repeaterRoot: Component,
     val tabPane: JTabbedPane,
     val drafts: List<M0DraftObservation>
 )
 
-internal enum class M0DraftEvidence { WAITING, MARKER_OBSERVED, STABLE_MARKER, UNCONFIRMED }
+internal enum class M0DraftEvidence { WAITING, STALE_CAPTURE, MARKER_OBSERVED, STABLE_MARKER, UNCONFIRMED }
 
 /**
  * A bounded observation of one marker, from an inventory captured before a
@@ -26,11 +28,15 @@ internal class M0DraftCreationWitness(
 ) {
     private val started = nowMillis()
     private var rejected = marker.isBlank() || before.drafts.any { it.caption == marker }
+    private var lastSequence = before.sequence
     private var candidate: M0DraftObservation? = null
 
     fun observe(current: M0DraftInventory?): M0DraftEvidence {
-        if (rejected || nowMillis() - started >= 5_000 || current == null || current.frame !== before.frame ||
+        if (rejected || nowMillis() - started >= 5_000 || current == null || current.source !== before.source ||
+            current.frame !== before.frame ||
             current.repeaterRoot !== before.repeaterRoot || current.tabPane !== before.tabPane) return reject()
+        if (current.sequence <= lastSequence) return M0DraftEvidence.STALE_CAPTURE
+        lastSequence = current.sequence
 
         val marked = current.drafts.filter { it.caption == marker }
         val previous = candidate

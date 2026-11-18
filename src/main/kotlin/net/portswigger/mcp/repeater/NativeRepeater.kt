@@ -275,22 +275,30 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         check(suiteTabs.selectedIndex == repeaterIndex) { "Repeater must already be selected" }
         val root = suiteTabs.getComponentAt(repeaterIndex)
         val tabPane = firstTabPanes(root).single()
-        val drafts = inventory(root).map { entry ->
-            // This witness intentionally covers the flat layout only, where
-            // every caption in the observed pane is represented in the inventory.
-            val step = entry.path.single()
-            val index = (0 until step.pane.tabCount).single { step.pane.getTabComponentAt(it) === step.header }
-            val content = step.pane.getComponentAt(index)
-            check(step.pane === tabPane && (step.pane === root || SwingUtilities.isDescendingFrom(step.pane, root)))
-            check(step.pane.getTitleAt(index) == entry.description.name)
-            M0DraftObservation(entry.description.name, step.header, content)
+        val drafts = (0 until tabPane.tabCount).map { index ->
+            val header = checkNotNull(tabPane.getTabComponentAt(index)) { "Unsupported Repeater tab header" }
+            val content = tabPane.getComponentAt(index)
+            // Inspect each row directly. Recursive inventory can omit a group
+            // with no children and would allocate public tab IDs as a side effect.
+            check(content == null || components(content).none { it is JTabbedPane && it.javaClass == tabPane.javaClass }) {
+                "Nested Repeater groups are outside the draft witness layout"
+            }
+            M0DraftObservation(tabPane.getTitleAt(index), header, content)
         }
         val (currentSuiteTabs, currentIndex) = locateRepeater(frame)
         check(suiteFrame() === frame && currentSuiteTabs === suiteTabs && currentIndex == repeaterIndex &&
             firstTabPanes(root).singleOrNull() === tabPane && suiteTabs.selectedIndex == repeaterIndex &&
             suiteTabs.getComponentAt(repeaterIndex) === root)
-        M0DraftInventory(frame, root, tabPane, drafts)
+        check(tabPane.tabCount == drafts.size && drafts.indices.all { index ->
+            val row = drafts[index]
+            tabPane.getTitleAt(index) == row.caption && tabPane.getTabComponentAt(index) === row.header &&
+                tabPane.getComponentAt(index) === row.content
+        }) { "Repeater rows changed during capture" }
+        M0DraftInventory(draftCaptureSource, ++draftCaptureSequence, frame, root, tabPane, drafts)
     }
+
+    private val draftCaptureSource = Any()
+    private var draftCaptureSequence = 0L // Accessed on EDT only.
 
     suspend fun read(tabId: String): RepeaterSnapshot {
         var current = withContext(Dispatchers.Swing) { snapshot(select(tabId)) }

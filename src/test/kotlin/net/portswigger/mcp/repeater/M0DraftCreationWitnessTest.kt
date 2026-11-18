@@ -100,6 +100,40 @@ class M0DraftCreationWitnessTest {
     }
 
     @Test
+    fun `empty nested group stops inventory even when its caption could collide with the marker`() = runBlocking {
+        val f = Fixture()
+        SwingUtilities.invokeAndWait {
+            f.tabs.addTab(marker, JTabbedPane())
+            f.tabs.setTabComponentAt(0, JLabel(marker))
+            f.add("Other")
+            f.tabs.selectedIndex = 1
+        }
+        val failure = runCatching { f.inventory() }.exceptionOrNull()
+        assertEquals("Nested Repeater groups are outside the draft witness layout", failure?.message)
+        assertEquals(1, f.tabs.selectedIndex)
+        assertEquals(marker, f.tabs.getTitleAt(0))
+    }
+
+    @Test
+    fun `replaying one marker snapshot provides no stability credit before a genuinely newer capture`() = runBlocking {
+        for (disappears in listOf(false, true)) {
+            val f = Fixture()
+            val baseline = f.inventory()
+            val witness = M0DraftCreationWitness(marker, baseline)
+            SwingUtilities.invokeAndWait { f.add(marker) }
+            val first = f.inventory()
+            assertEquals(M0DraftEvidence.MARKER_OBSERVED, witness.observe(first))
+            assertEquals(M0DraftEvidence.STALE_CAPTURE, witness.observe(first))
+            assertEquals(M0DraftEvidence.STALE_CAPTURE, witness.observe(baseline))
+            if (disappears) SwingUtilities.invokeAndWait { f.tabs.removeAll() }
+            assertEquals(
+                if (disappears) M0DraftEvidence.UNCONFIRMED else M0DraftEvidence.STABLE_MARKER,
+                witness.observe(f.inventory())
+            )
+        }
+    }
+
+    @Test
     fun `expiry and unavailable inventory refuse and capture never selects Repeater`() = runBlocking {
         val f = Fixture()
         var now = 0L
