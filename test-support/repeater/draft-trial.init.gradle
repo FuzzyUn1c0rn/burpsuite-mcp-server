@@ -1,0 +1,33 @@
+// Optional offline packaging for the disposable-project draft trial.
+// The normal build does not apply this init script or include test classes.
+gradle.projectsEvaluated {
+    def project = gradle.rootProject
+    def sets = project.sourceSets
+    project.tasks.register('m0DraftTrialJar', Jar) {
+        dependsOn project.tasks.named('testClasses')
+        archiveFileName = 'm0-draft-trial.jar'
+        destinationDirectory = project.layout.buildDirectory.dir('m0-draft-trial')
+        preserveFileTimestamps = false
+        reproducibleFileOrder = true
+        manifest.attributes('Main-Class': 'net.portswigger.mcp.repeater.M0DraftTrialExtension')
+        from(sets.main.output) {
+            include 'net/portswigger/mcp/repeater/M0DraftCreationWitness*.class'
+            include 'net/portswigger/mcp/repeater/M0DraftEvidence.class'
+            include 'net/portswigger/mcp/repeater/M0DraftInventory.class'
+            include 'net/portswigger/mcp/repeater/M0DraftObservation.class'
+        }
+        from(sets.test.output) {
+            include 'net/portswigger/mcp/repeater/M0DraftTrialExtension*.class'
+            include 'net/portswigger/mcp/repeater/DraftTrial*.class'
+        }
+        from({
+            def stdlib = project.configurations.testRuntimeClasspath.files.findAll {
+                it.name ==~ /kotlin-stdlib-[0-9].*\.jar/
+            }
+            if (stdlib.size() != 1) throw new GradleException('Expected exactly one Kotlin standard library')
+            project.zipTree(stdlib.iterator().next())
+        }) {
+            include 'kotlin/**'
+        }
+    }
+}
