@@ -7,6 +7,7 @@ import kotlinx.serialization.json.Json
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
+import java.awt.GraphicsEnvironment
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import javax.swing.*
@@ -46,8 +47,13 @@ class RepeaterM0ProfileMenuTest {
     }
 
     private fun showOwnedPopup(menu: PassiveMenu): JPopupMenu {
+        check(GraphicsEnvironment.isHeadless()) {
+            "The popup fixture requires a headless test JVM. Run Gradle test or set -Djava.awt.headless=true on the test JVM."
+        }
         val popup = menu.materializeForTest()
         SwingUtilities.invokeAndWait {
+            // A displayable headless parent lets the real JMenu-owned popup
+            // report showing without creating a window.
             val host = JPanel()
             host.addNotify()
             host.add(popup)

@@ -82,6 +82,7 @@ tasks {
     test {
         useJUnitPlatform()
         systemProperty("file.encoding", "UTF-8")
+        systemProperty("java.awt.headless", "true")
 
         testLogging {
             events("passed", "skipped", "failed")
