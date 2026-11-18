@@ -63,8 +63,11 @@ private class DraftTrial(private val api: MontoyaApi) : ContextMenuItemsProvider
             val service = request.httpService()
             check(service.host() == "127.0.0.1" && service.port() == 18180 && !service.secure() &&
                 request.toByteArray().getBytes().contentEquals(bytes))
+            val repeater = api.repeater()
+            val sourceRead = DraftTrialSnapshot.selected(inventory())
             val before = inventory()
-            if (!sourceDraft.sameSource(DraftTrialSnapshot.selected(before)) || before.drafts.any { it.caption == marker }) {
+            if (sourceRead == null || !sourceDraft.sameSource(sourceRead) || !sourceRead.retainedIn(before) ||
+                before.drafts.any { it.caption == marker }) {
                 log("UNCONFIRMED source_changed_or_marker_collision")
                 return
             }
@@ -75,7 +78,7 @@ private class DraftTrial(private val api: MontoyaApi) : ContextMenuItemsProvider
                 return
             }
             // This Montoya method opens a draft in Repeater. This harness has no Send action.
-            api.repeater().sendToRepeater(request, marker)
+            repeater.sendToRepeater(request, marker)
             log("STARTED baselineRows=${before.drafts.size}")
             timer = Timer(50) {
                 try {
@@ -97,17 +100,23 @@ private class DraftTrial(private val api: MontoyaApi) : ContextMenuItemsProvider
                         M0DraftEvidence.STABLE_MARKER -> {
                             val draft = capture.drafts.single { it.caption == marker }
                             val observed = DraftTrialSnapshot.selected(capture)
+                            if (observed == null || !sourceDraft.matchesClone(draft, observed)) {
+                                finish("UNCONFIRMED clone_readback_mismatch_or_unavailable")
+                                return@Timer
+                            }
+                            val finalCapture = inventory()
                             if (unloaded.get()) {
                                 cancel()
                                 return@Timer
                             }
-                            if (!sourceDraft.matchesClone(draft, observed)) {
-                                finish("UNCONFIRMED clone_readback_mismatch_or_unavailable")
+                            if (!observed.retainedIn(finalCapture) ||
+                                witness.observe(finalCapture) != M0DraftEvidence.STABLE_MARKER) {
+                                finish("UNCONFIRMED inventory_changed_during_readback")
                                 return@Timer
                             }
                             finish("CLONE_CONFIRMED caption=$marker firstMarkerCapture=$firstMarkerSequence " +
                                 "secondMarkerCapture=${capture.sequence} baselineIdentitiesPreserved=true " +
-                                "editorTextEqual=true destinationEqual=true")
+                                "finalInventoryCapture=${finalCapture.sequence} editorTextEqual=true destinationEqual=true")
                         }
                         else -> finish("UNCONFIRMED witness=$result")
                     }
@@ -181,15 +190,28 @@ internal class DraftTrialSnapshot private constructor(
     fun isSupported() = text == REQUEST && target == TARGET
 
     fun sameSource(current: DraftTrialSnapshot?): Boolean =
-        current != null && samePane(current) && current.owns(draft) && current.text == text && current.target == target
-
-    fun matchesClone(marked: M0DraftObservation, current: DraftTrialSnapshot?): Boolean =
-        current != null && samePane(current) && current.owns(marked) && !current.owns(draft) &&
+        current != null && samePane(current.inventory) && current.owns(draft) &&
             current.text == text && current.target == target
 
-    private fun samePane(other: DraftTrialSnapshot) =
-        inventory.source === other.inventory.source && inventory.frame === other.inventory.frame &&
-            inventory.repeaterRoot === other.inventory.repeaterRoot && inventory.tabPane === other.inventory.tabPane
+    fun matchesClone(marked: M0DraftObservation, current: DraftTrialSnapshot?): Boolean =
+        current != null && samePane(current.inventory) && current.owns(marked) && !current.owns(draft) &&
+            current.text == text && current.target == target
+
+    /** Recheck every row after reading the editor and target, whose accessors may change Swing state. */
+    fun retainedIn(current: M0DraftInventory): Boolean {
+        if (!samePane(current) || current.sequence != inventory.sequence + 1 ||
+            current.drafts.size != inventory.drafts.size) return false
+        val selected = current.drafts.getOrNull(current.tabPane.selectedIndex) ?: return false
+        return owns(selected) && current.drafts.indices.all { index ->
+            val before = inventory.drafts[index]
+            val after = current.drafts[index]
+            after.caption == before.caption && after.header === before.header && after.content === before.content
+        }
+    }
+
+    private fun samePane(other: M0DraftInventory) =
+        inventory.source === other.source && inventory.frame === other.frame &&
+            inventory.repeaterRoot === other.repeaterRoot && inventory.tabPane === other.tabPane
 
     private fun owns(row: M0DraftObservation) = draft.header === row.header && draft.content === row.content
 
@@ -217,6 +239,8 @@ internal class DraftTrialSnapshot private constructor(
             } ?: return null
             val text = editor.text
             val label = target.text ?: return null
+            // Read the editor last so a target getter that edits the draft cannot leave stale text.
+            if (target.text != label || editor.text != text) return null
             if (!stillSelected() || !editor.isShowing || !target.isShowing ||
                 !SwingUtilities.isDescendingFrom(editor, content) || !SwingUtilities.isDescendingFrom(target, content)) return null
             return DraftTrialSnapshot(inventory, row, text, label)
