@@ -1,8 +1,13 @@
 package net.portswigger.mcp.repeater
 
 import kotlinx.coroutines.*
+import io.mockk.every
+import io.mockk.mockk
+import net.portswigger.mcp.config.Dialogs
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
+import java.awt.Window
+import java.util.concurrent.atomic.AtomicReference
 
 class RepeaterSendApprovalTest {
     private val snapshot = RepeaterApprovalSnapshot("instance", "operation", "native-tab", "fingerprint",
@@ -34,9 +39,9 @@ class RepeaterSendApprovalTest {
             assertEquals("HTTP/2", display.protocol)
             assertEquals(snapshot.verifiedProfile, display.profile)
             assertEquals(
-                "POST\\x20/\\x20HTTP/2\\r\\n\nHost:\\x20display.test\\r\\n\n" +
-                    "X-Key:\\x20a\\r\\n\nX-Key:\\x20b\\r\\n\n\\r\\n\n" +
-                    "caf\\u00e9\\x20\\t\\u202e\\\\", display.request
+                "POST / HTTP/2\\r\\n\nHost: display.test\\r\\n\n" +
+                    "X-Key: a\\r\\n\nX-Key: b\\r\\n\n\\r\\n\n" +
+                    "caf\\u00e9 \\t\\u202e\\\\", display.request
             )
             assertEquals(0, boundary.attempts)
             true
@@ -101,6 +106,10 @@ class RepeaterSendApprovalTest {
             RepeaterSendApproval().review(verified.copy(snapshot = snapshot.copy(request = "\uD800")), dialog, boundary::execute))
         assertEquals(RepeaterApprovalResult.PERMISSION_DENIED,
             RepeaterSendApproval().review(verified.copy(repeaterAccess = false), dialog, boundary::execute))
+        for (host in listOf("invalid host", "example.test:99", "other.test/path", "[invalid]", "evil@host")) {
+            assertEquals(RepeaterApprovalResult.UNVERIFIED_SETTINGS,
+                RepeaterSendApproval().review(verified.copy(snapshot = snapshot.copy(host = host)), dialog, boundary::execute))
+        }
         assertEquals(0, boundary.attempts)
     }
 
@@ -163,5 +172,76 @@ class RepeaterSendApprovalTest {
         assertFalse(expiring.attemptRecorded)
         assertFalse(canceled.attemptRecorded)
         assertEquals(0, boundary.attempts)
+    }
+
+    @Test
+    fun `only the synchronous check determines admission despite contradictory boundary returns`() = runBlocking {
+        val fake = RepeaterSendApproval()
+        assertEquals(RepeaterApprovalResult.CLOSED, fake.review(verified, { true }) { RepeaterApprovalResult.ATTEMPT_ADMITTED })
+        assertFalse(fake.attemptRecorded)
+
+        val boundary = Boundary(verified)
+        val proper = RepeaterSendApproval()
+        assertEquals(RepeaterApprovalResult.ATTEMPT_ADMITTED, proper.review(verified, { true }) { check ->
+            boundary.execute(check)
+            assertEquals(RepeaterApprovalResult.CLOSED, check(verified))
+            RepeaterApprovalResult.PERMISSION_DENIED
+        })
+        assertTrue(proper.attemptRecorded)
+        assertEquals(1, boundary.attempts)
+
+        val rejected = RepeaterSendApproval()
+        assertEquals(RepeaterApprovalResult.STALE_FINGERPRINT, rejected.review(verified, { true }) { check ->
+            assertEquals(RepeaterApprovalResult.STALE_FINGERPRINT, check(verified.copy(snapshot = snapshot.copy(port = 443))))
+            assertEquals(RepeaterApprovalResult.CLOSED, check(verified))
+            RepeaterApprovalResult.ATTEMPT_ADMITTED
+        })
+        assertFalse(rejected.attemptRecorded)
+    }
+
+    @Test
+    fun `final clock sample follows state comparison and a borrowed check cannot admit`() = runBlocking {
+        var samples = 0
+        val boundary = Boundary(verified.copy(snapshot = snapshot.copy(port = 443)))
+        val stale = RepeaterSendApproval(1000) { if (++samples < 3) 0L else 1000L }
+        assertEquals(RepeaterApprovalResult.STALE_FINGERPRINT, stale.review(verified, { true }, boundary::execute))
+        assertEquals(2, samples)
+        assertEquals(0, boundary.attempts)
+
+        val gate = RepeaterSendApproval()
+        val otherThreadResult = AtomicReference<RepeaterApprovalResult>()
+        assertEquals(RepeaterApprovalResult.CLOSED, gate.review(verified, { true }) { check ->
+            val borrowed = Thread { otherThreadResult.set(check(verified)) }
+            borrowed.start()
+            borrowed.join(1_000)
+            assertFalse(borrowed.isAlive)
+            RepeaterApprovalResult.ATTEMPT_ADMITTED
+        })
+        assertEquals(RepeaterApprovalResult.CLOSED, otherThreadResult.get())
+        assertFalse(gate.attemptRecorded)
+    }
+
+    @Test
+    fun `a hidden or changed required dialog owner declines before constructing a window`() = runBlocking {
+        val expected = mockk<Window>()
+        val replacement = mockk<Window>()
+        every { expected.isShowing } returns false
+        every { replacement.isShowing } returns true
+        assertEquals(-1, Dialogs.requestOption(expected, "Test", arrayOf("Deny"), requiredOwner = expected))
+        assertEquals(-1, Dialogs.requestOption(replacement, "Test", arrayOf("Deny"), requiredOwner = expected))
+    }
+
+    @Test
+    fun `IPv6 endpoint displays one bracketed host and a port and trailing spaces stay visible`() = runBlocking {
+        for (host in listOf("2001:db8::1", "[2001:db8::1]")) {
+            val proposed = verified.copy(snapshot = snapshot.copy(host = host, request = "GET / HTTP/2\r\n\r\nend "))
+            val boundary = Boundary(proposed)
+            assertEquals(RepeaterApprovalResult.PERMISSION_DENIED,
+                RepeaterSendApproval().review(proposed, { display ->
+                    assertEquals("https://[2001:db8::1]:8443", display.destination)
+                    assertEquals("GET / HTTP/2\\r\\n\n\\r\\n\nend\\x20", display.request)
+                    false
+                }, boundary::execute))
+        }
     }
 }

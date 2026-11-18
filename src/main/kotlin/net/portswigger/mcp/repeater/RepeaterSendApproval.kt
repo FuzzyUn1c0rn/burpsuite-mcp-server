@@ -8,7 +8,10 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 import net.portswigger.mcp.Swing
 import net.portswigger.mcp.config.Dialogs
+import net.portswigger.mcp.config.showingOptionOwner
 import java.awt.Component
+import java.net.URI
+import java.net.URISyntaxException
 import java.util.concurrent.atomic.AtomicReference
 
 internal data class RepeaterApprovalSnapshot(
@@ -36,14 +39,15 @@ internal fun interface RepeaterApprovalDialog {
 /** Local dialog only. The parent is supplied by the owning Burp application. */
 internal class BurpRepeaterApprovalDialog(private val parent: Component) : RepeaterApprovalDialog {
     override suspend fun approveOnce(display: RepeaterApprovalDisplay): Boolean {
-        if (!withContext(Dispatchers.Swing) { parent.isShowing }) return false
+        val owner = withContext(Dispatchers.Swing) { showingOptionOwner(parent) } ?: return false
         return Dialogs.requestOption(
             parent,
             "Actual connection destination: ${display.destination}\n" +
                 "Configured protocol: ${display.protocol}\nExecution profile: ${display.profile}\n\n" +
-                "Review the complete request. Backslash escapes show line endings, control characters and Unicode.",
+                "Review the complete request. Backslash escapes show line endings, trailing spaces, control characters and Unicode.",
             arrayOf("Deny", "Approve once"),
-            requestContent = display.request
+            requestContent = display.request,
+            requiredOwner = owner
         ) == 1
     }
 }
@@ -102,30 +106,36 @@ internal class RepeaterSendApproval(
             if (!state.compareAndSet(State.PENDING, State.APPROVED)) return RepeaterApprovalResult.CLOSED
             val boundaryThread = Thread.currentThread()
             var boundSnapshot: RepeaterApprovalSnapshot? = snapshot
+            var decision = RepeaterApprovalResult.CLOSED
+            var checked = false
             try {
-                return atProtectedBoundary { current ->
+                atProtectedBoundary { current ->
                     // A queued or borrowed callback cannot authorize an attempt.
-                    if (Thread.currentThread() !== boundaryThread || state.get() != State.APPROVED)
+                    if (Thread.currentThread() !== boundaryThread || checked || state.get() != State.APPROVED)
                         return@atProtectedBoundary RepeaterApprovalResult.CLOSED
+                    checked = true
                     context.ensureActive()
                     val rejection = when {
-                        expired() -> RepeaterApprovalResult.EXPIRED
                         !current.repeaterAccess -> RepeaterApprovalResult.PERMISSION_DENIED
                         !current.operationEligible -> RepeaterApprovalResult.OPERATION_NOT_ELIGIBLE
                         current.snapshot == null -> RepeaterApprovalResult.UNVERIFIED_SETTINGS
                         current.snapshot != boundSnapshot -> RepeaterApprovalResult.STALE_FINGERPRINT
                         else -> null
                     }
-                    // Any checked mismatch permanently closes this approval.
-                    if (rejection != null) {
-                        close()
-                        rejection
-                    } else if (state.compareAndSet(State.APPROVED, State.ATTEMPTED)) {
-                        RepeaterApprovalResult.ATTEMPT_ADMITTED
-                    } else {
-                        RepeaterApprovalResult.CLOSED
+                    // Compare first, then sample the deadline immediately before the
+                    // atomic transition. Cancellation and admission compete for it.
+                    context.ensureActive()
+                    decision = when {
+                        rejection != null -> rejection
+                        expired() -> RepeaterApprovalResult.EXPIRED
+                        state.compareAndSet(State.APPROVED, State.ATTEMPTED) -> RepeaterApprovalResult.ATTEMPT_ADMITTED
+                        else -> RepeaterApprovalResult.CLOSED
                     }
+                    if (!attemptRecorded) close()
+                    decision
                 }
+                // Only the synchronous check can report admission.
+                return decision
             } finally {
                 // Even if the adapter retained the callback, it keeps no request.
                 boundSnapshot = null
@@ -140,24 +150,35 @@ internal class RepeaterSendApproval(
 
 private fun RepeaterApprovalSnapshot.display(): RepeaterApprovalDisplay? {
     if (listOf(serverInstanceId, operationId, nativeTabIdentity, fingerprint).any { it.isBlank() } ||
-        host.length !in 1..253 || host.any { it !in '!'..'~' || it in "/?#@\\<>" } || port !in 1..65535 ||
         configuredProtocol !in setOf("HTTP/1.1", "HTTP/2") ||
         verifiedProfile.length !in 1..512 || verifiedProfile.any { it !in ' '..'~' } ||
         request.isBlank() || request.length > 262_144 || request.toByteArray(Charsets.UTF_8).size > 262_144) return null
     if (!Charsets.UTF_8.newEncoder().canEncode(request)) return null
-    val address = if (':' in host && !host.startsWith('[')) "[$host]" else host
-    val destination = "${if (tls) "https" else "http"}://$address:$port"
+    val destination = approvalEndpoint(host, port, tls)?.toASCIIString() ?: return null
     return RepeaterApprovalDisplay(destination, configuredProtocol, verifiedProfile, renderRequest(request))
+}
+
+private fun approvalEndpoint(host: String, port: Int, tls: Boolean): URI? {
+    if (port !in 1..65535 || host.length !in 1..253 ||
+        host.any { it !in 'a'..'z' && it !in 'A'..'Z' && it !in '0'..'9' && it !in ".:[]-" }) return null
+    return try {
+        URI(if (tls) "https" else "http", null, host, port, null, null, null).takeIf { it.host != null }
+    } catch (_: URISyntaxException) {
+        null
+    }
 }
 
 /** Reversible display of the complete approved representation, without Swing HTML interpretation. */
 private fun renderRequest(request: String) = buildString {
-    for (char in request) when (char) {
+    for (index in request.indices) when (val char = request[index]) {
         '\\' -> append("\\\\")
         '\r' -> append("\\r")
         '\n' -> append("\\n\n")
         '\t' -> append("\\t")
-        ' ' -> append("\\x20")
+        ' ' -> when (request.getOrNull(index + 1)) {
+            null, '\r', '\n' -> append("\\x20")
+            else -> append(' ')
+        }
         in '!'..'~' -> append(char)
         else -> append("\\u").append(char.code.toString(16).padStart(4, '0'))
     }

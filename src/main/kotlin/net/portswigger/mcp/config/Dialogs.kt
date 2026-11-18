@@ -12,6 +12,12 @@ import java.awt.event.KeyEvent
 import javax.swing.*
 import javax.swing.border.EmptyBorder
 
+internal fun showingOptionOwner(parent: Component?): Window? {
+    check(SwingUtilities.isEventDispatchThread())
+    if (parent?.isShowing != true) return null
+    return (parent as? Window ?: SwingUtilities.getWindowAncestor(parent))?.takeIf { it.isShowing }
+}
+
 object Dialogs {
 
     private fun wrapText(text: String, maxWidth: Int = 50): String {
@@ -40,8 +46,8 @@ object Dialogs {
         return result.toString()
     }
 
-    private fun createDialog(parent: Component?): JDialog {
-        val parentWindow = SwingUtilities.getWindowAncestor(parent)
+    private fun createDialog(parent: Component?, requiredOwner: Window? = null): JDialog {
+        val parentWindow = requiredOwner ?: SwingUtilities.getWindowAncestor(parent)
         return JDialog(parentWindow, "", Dialog.ModalityType.APPLICATION_MODAL).apply {
             background = Design.Colors.surface
             defaultCloseOperation = JDialog.DISPOSE_ON_CLOSE
@@ -290,17 +296,25 @@ object Dialogs {
         message: String,
         options: Array<String>,
         requestContent: String? = null,
-        api: MontoyaApi? = null
+        api: MontoyaApi? = null,
+        requiredOwner: Window? = null
     ): Int = suspendCancellableCoroutine { continuation ->
         SwingUtilities.invokeLater {
             if (!continuation.isActive) return@invokeLater
             try {
-                val result = showOptionDialog(parent, message, options, requestContent, api) { dialog ->
+                if (requiredOwner != null && showingOptionOwner(parent) !== requiredOwner) {
+                    continuation.resume(-1)
+                    return@invokeLater
+                }
+                val onShow: (JDialog) -> Boolean = { dialog ->
                     continuation.invokeOnCancellation {
                         SwingUtilities.invokeLater { dialog.dispose() }
                     }
-                    continuation.isActive
+                    continuation.isActive && (requiredOwner == null ||
+                        (dialog.owner === requiredOwner && showingOptionOwner(parent) === requiredOwner))
                 }
+                val result = if (requiredOwner == null) showOptionDialog(parent, message, options, requestContent, api, onShow)
+                else showOptionDialogOwned(parent, message, options, requestContent, api, requiredOwner, onShow)
                 continuation.resume(result)
             } catch (error: Exception) {
                 continuation.resumeWithException(error)
@@ -315,8 +329,18 @@ object Dialogs {
         requestContent: String? = null,
         api: MontoyaApi? = null,
         onShow: (JDialog) -> Boolean = { true }
+    ): Int = showOptionDialogOwned(parent, message, options, requestContent, api, null, onShow)
+
+    private fun showOptionDialogOwned(
+        parent: Component?,
+        message: String,
+        options: Array<String>,
+        requestContent: String? = null,
+        api: MontoyaApi? = null,
+        requiredOwner: Window? = null,
+        onShow: (JDialog) -> Boolean = { true }
     ): Int {
-        val dialog = createDialog(parent)
+        val dialog = createDialog(parent, requiredOwner)
         var result = -1
 
         val messageArea = JTextArea(message).apply {
@@ -480,7 +504,13 @@ object Dialogs {
 
         dialog.pack()
 
-        if (parent != null && parent.isDisplayable) {
+        if (requiredOwner != null) {
+            if (showingOptionOwner(parent) !== requiredOwner) {
+                dialog.dispose()
+                return -1
+            }
+            dialog.setLocationRelativeTo(requiredOwner)
+        } else if (parent != null && parent.isDisplayable) {
             dialog.setLocationRelativeTo(parent)
 
             dialog.isAlwaysOnTop = true
@@ -494,8 +524,11 @@ object Dialogs {
             )
         }
 
-        if (onShow(dialog)) dialog.isVisible = true
-        else dialog.dispose()
+        if (!onShow(dialog)) {
+            dialog.dispose()
+            return -1
+        }
+        dialog.isVisible = true
 
         SwingUtilities.invokeLater {
             dialog.isAlwaysOnTop = false
