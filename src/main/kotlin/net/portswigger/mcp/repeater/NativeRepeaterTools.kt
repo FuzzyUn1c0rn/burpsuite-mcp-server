@@ -8,19 +8,18 @@ import burp.api.montoya.http.handler.HttpResponseReceived
 import burp.api.montoya.http.handler.RequestToBeSentAction
 import burp.api.montoya.http.handler.ResponseReceivedAction
 import io.modelcontextprotocol.kotlin.sdk.server.Server
+import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
+import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import net.portswigger.mcp.config.McpConfig
+import net.portswigger.mcp.schema.asInputSchema
 import net.portswigger.mcp.security.DataAccessSecurity
 import net.portswigger.mcp.security.DataAccessType
-import net.portswigger.mcp.security.HttpRequestSecurity
 import net.portswigger.mcp.tools.mcpTool
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -97,51 +96,30 @@ internal fun Server.registerNativeRepeaterTools(api: MontoyaApi, config: McpConf
         operations.withLock { Json.encodeToString(native.read(tabId)) }
     }
 
-    mcpTool<SendRepeaterTab>("Experimental: clicks Send in the exact native Repeater tab and returns the first matching HTTP exchange. Requires the fingerprint from get_repeater_tab; rejects changed or closed tabs. Do not manually send identical requests concurrently. A timeout or cancellation after the click does not cancel Burp's request: inspect Burp before retrying. Single-request mode only; redirects and session rules can prevent exact capture.") {
-        val timeout = timeoutMs ?: 10_000
-        val responseLimit = maxResponseLength ?: 20_000
-        require(timeout in 100..60_000) { "timeoutMs must be between 100 and 60000." }
-        require(responseLimit in 1..200_000) { "maxResponseLength must be between 1 and 200000." }
-        checkReadPermission()
-        operations.withLock {
-            val expected = native.read(tabId)
-            require(expected.fingerprint == expectedFingerprint) {
-                "Repeater request or target changed. Read the tab again before sending."
-            }
-            check(HttpRequestSecurity.checkHttpRequestPermission(
-                expected.targetHostname, expected.targetPort, config, expected.request, api
-            )) { "Repeater send denied by Burp Suite." }
-            currentCoroutineContext().ensureActive()
-            val captureProbe = if (investigationMode) RepeaterM0CaptureProbe() else null
-            val capture = RepeaterExchangeCapture(expected, captureProbe)
-            val registration = api.http().registerHttpHandler(capture)
+    addTool(
+        name = "send_repeater_tab",
+        description = "Repeater Send is unavailable until exact request approval and execution settings validation are supported.",
+        inputSchema = SendRepeaterTab::class.asInputSchema()
+    ) { request ->
+        val args = request.params.arguments?.let {
             try {
-                native.send(tabId, expectedFingerprint) { capture.arm() }
-                api.logging().logToOutput("MCP native Repeater Send: $tabId ${expected.targetHostname}:${expected.targetPort}")
-                val exchange = withTimeoutOrNull(timeout.toLong()) {
-                    val received = capture.result.await()
-                    // The response handler runs before Burp updates its native completion controls.
-                    try {
-                        native.awaitIdle(tabId)
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        error("The request was sent and a response captured, but the native tab changed before completion. Inspect Burp before retrying.")
-                    }
-                    received
-                }
-                    ?: error("No matching Repeater response captured within ${timeout}ms. The native request may still be running or may have been modified by session rules. Inspect Burp before retrying; no retry was made." +
-                        (captureProbe?.let { " M0_CAPTURE_DIAGNOSTICS=" + Json.encodeToString(it.snapshot()) } ?: ""))
-                Json.encodeToString(RepeaterSendResult(
-                    tabId, exchange.messageId, exchange.request, exchange.response.take(responseLimit),
-                    exchange.response.length > responseLimit, captureProbe?.snapshot()
-                ))
-            } finally {
-                registration.deregister()
+                Json.decodeFromJsonElement(SendRepeaterTab.serializer(), it)
+            } catch (_: SerializationException) {
+                null
             }
         }
+        val valid = args != null && (args.timeoutMs ?: 10_000) in 100..60_000 &&
+            (args.maxResponseLength ?: 20_000) in 1..200_000
+        val error = if (valid) RepeaterSendUnavailable(
+            "UNVERIFIED_SETTINGS", "Repeater Send is unavailable until exact request approval and execution settings validation are supported.",
+            "not_attempted"
+        ) else RepeaterSendUnavailable("INVALID_ARGUMENT", "Check the Repeater Send arguments and limits.", "not_attempted")
+        CallToolResult(content = listOf(TextContent(Json.encodeToString(error))), isError = true)
     }
 }
+
+@Serializable
+private data class RepeaterSendUnavailable(val code: String, val message: String, val dispatchState: String)
 
 /** Observe one exact Repeater exchange. Pass all traffic through unchanged. */
 internal class RepeaterExchangeCapture(
