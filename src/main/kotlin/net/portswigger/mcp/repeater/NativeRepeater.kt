@@ -18,6 +18,7 @@ import java.util.WeakHashMap
 import java.util.Locale
 import javax.accessibility.AccessibleState
 import javax.swing.AbstractButton
+import javax.swing.DefaultButtonModel
 import javax.swing.JLabel
 import javax.swing.JTabbedPane
 import javax.swing.JTextArea
@@ -376,9 +377,17 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         fun listenersFor(control: Component, label: JLabel?): Array<out EventListener> =
             if (label == null) (control as AbstractButton).actionListeners else control.mouseListeners
 
+        fun sameListeners(expected: Array<out EventListener>, current: Array<out EventListener>): Boolean =
+            current.size == expected.size && expected.indices.all { current[it] === expected[it] }
+
         val initial = verifyReady()
         val (control, label) = findSendControl()
         val listeners = listenersFor(control, label)
+        val button = if (label == null) control as AbstractButton else null
+        val buttonModel = button?.model
+        // ButtonModel itself exposes listener registration only. Sample listeners when the public model exposes them.
+        val defaultModel = buttonModel as? DefaultButtonModel
+        val modelListeners = defaultModel?.actionListeners.orEmpty()
 
         fun verifyUnchanged() {
             val current = verifyReady()
@@ -390,17 +399,23 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
             require(currentControl === control && currentLabel === label) {
                 "Repeater Send control changed; no request was sent."
             }
-            val currentListeners = listenersFor(currentControl, currentLabel)
-            require(currentListeners.size == listeners.size &&
-                listeners.indices.all { currentListeners[it] === listeners[it] }) {
+            require(sameListeners(listeners, listenersFor(currentControl, currentLabel))) {
                 "Repeater Send listeners changed; no request was sent."
+            }
+            require(button?.model === buttonModel) {
+                "Repeater Send button model changed; no request was sent."
+            }
+            if (defaultModel != null) {
+                require(sameListeners(modelListeners, defaultModel.actionListeners)) {
+                    "Repeater Send button model listeners changed; no request was sent."
+                }
             }
         }
 
         beforeClick()
         verifyUnchanged()
-        if (label == null) {
-            (control as AbstractButton).doClick(0)
+        if (button != null) {
+            button.doClick(0)
         } else {
             val now = System.currentTimeMillis()
             val x = control.width / 2

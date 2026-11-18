@@ -409,6 +409,32 @@ class NativeRepeaterTest {
     }
 
     @Test
+    fun `send refuses a replaced button model or a changed model listener`() = runBlocking {
+        for (replaceModel in listOf(true, false)) {
+            val f = Fixture()
+            f.add("target")
+            val before = f.native.read(f.native.tabs().single().tabId)
+            val panel = f.tabs.getComponentAt(0) as JPanel
+            val send = panel.components.filterIsInstance<JButton>().single { it.text == "Send" }
+            var modelActions = 0
+            var hookRan = false
+
+            assertThrows(IllegalArgumentException::class.java, {
+                runBlocking {
+                    f.native.send(before.tabId, before.fingerprint) {
+                        hookRan = true
+                        if (replaceModel) send.model = DefaultButtonModel()
+                        send.model.addActionListener { modelActions++ }
+                    }
+                }
+            }, if (replaceModel) "new button model" else "same model with a new listener")
+            assertTrue(hookRan)
+            assertEquals(0, modelActions)
+            assertEquals(0, f.sends)
+        }
+    }
+
+    @Test
     fun `label based send clicks once only while the original control stays valid`() = runBlocking {
         for (change in listOf("none", "replace panel", "replace label", "disable panel", "disable label",
             "remove listener", "replace listener", "lose bounds", "mutate on press", "mutate on release")) {
