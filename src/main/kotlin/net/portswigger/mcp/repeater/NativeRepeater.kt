@@ -12,6 +12,7 @@ import java.awt.event.MouseEvent
 import java.net.URI
 import java.lang.ref.WeakReference
 import java.security.MessageDigest
+import java.util.EventListener
 import java.util.UUID
 import java.util.WeakHashMap
 import java.util.Locale
@@ -326,7 +327,7 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         val (suiteTabs, repeaterIndex) = locateRepeater(frame)
         val repeaterRoot = suiteTabs.getComponentAt(repeaterIndex)
 
-        fun verifyReady() {
+        fun verifyReady(): RepeaterSnapshot {
             val (currentSuiteTabs, currentIndex) = locateRepeater(frame)
             require(suiteFrame() === frame && currentSuiteTabs === suiteTabs &&
                 suiteTabs.selectedIndex == currentIndex && suiteTabs.getComponentAt(currentIndex) === repeaterRoot &&
@@ -334,7 +335,11 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
                     SwingUtilities.isDescendingFrom(selected.identity.first().pane, repeaterRoot))) {
                 "Native Repeater selection changed; no request was sent."
             }
-            require(snapshot(selected).fingerprint == expectedFingerprint) {
+            val current = snapshot(selected)
+            require(visibleWithin(selected.content, frame)) {
+                "Native Repeater selection is hidden; no request was sent."
+            }
+            require(current.fingerprint == expectedFingerprint) {
                 "Repeater request or target changed. Read the tab again before sending."
             }
             val cancel = components(selected.content).filterIsInstance<AbstractButton>()
@@ -342,6 +347,7 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
             require(cancel.size == 1 && !cancel.single().isEnabled) {
                 "Cannot verify that the Repeater tab is idle; no request was sent."
             }
+            return current
         }
 
         fun findSendControl(): Pair<Component, JLabel?> {
@@ -367,26 +373,52 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
             return control to label
         }
 
-        verifyReady()
+        fun listenersFor(control: Component, label: JLabel?): Array<out EventListener> =
+            if (label == null) (control as AbstractButton).actionListeners else control.mouseListeners
+
+        val initial = verifyReady()
         val (control, label) = findSendControl()
-        beforeClick()
-        verifyReady()
-        val (currentControl, currentLabel) = findSendControl()
-        require(currentControl === control && currentLabel === label) {
-            "Repeater Send control changed; no request was sent."
+        val listeners = listenersFor(control, label)
+
+        fun verifyUnchanged() {
+            val current = verifyReady()
+            require(current.request == initial.request && current.targetHostname == initial.targetHostname &&
+                current.targetPort == initial.targetPort && current.usesHttps == initial.usesHttps) {
+                "Repeater request or target changed. Read the tab again before sending."
+            }
+            val (currentControl, currentLabel) = findSendControl()
+            require(currentControl === control && currentLabel === label) {
+                "Repeater Send control changed; no request was sent."
+            }
+            val currentListeners = listenersFor(currentControl, currentLabel)
+            require(currentListeners.size == listeners.size &&
+                listeners.indices.all { currentListeners[it] === listeners[it] }) {
+                "Repeater Send listeners changed; no request was sent."
+            }
         }
+
+        beforeClick()
+        verifyUnchanged()
         if (label == null) {
             (control as AbstractButton).doClick(0)
         } else {
             val now = System.currentTimeMillis()
             val x = control.width / 2
             val y = control.height / 2
-            control.dispatchEvent(MouseEvent(control, MouseEvent.MOUSE_PRESSED, now,
-                InputEvent.BUTTON1_DOWN_MASK, x, y, 1, false, MouseEvent.BUTTON1))
-            control.dispatchEvent(MouseEvent(control, MouseEvent.MOUSE_RELEASED, now + 1,
-                0, x, y, 1, false, MouseEvent.BUTTON1))
-            control.dispatchEvent(MouseEvent(control, MouseEvent.MOUSE_CLICKED, now + 2,
-                0, x, y, 1, false, MouseEvent.BUTTON1))
+            // Each event can synchronously invoke application code. Once dispatch starts, the outcome is unknown
+            // if a callback fails or the remaining events can no longer be admitted.
+            try {
+                control.dispatchEvent(MouseEvent(control, MouseEvent.MOUSE_PRESSED, now,
+                    InputEvent.BUTTON1_DOWN_MASK, x, y, 1, false, MouseEvent.BUTTON1))
+                verifyUnchanged()
+                control.dispatchEvent(MouseEvent(control, MouseEvent.MOUSE_RELEASED, now + 1,
+                    0, x, y, 1, false, MouseEvent.BUTTON1))
+                verifyUnchanged()
+                control.dispatchEvent(MouseEvent(control, MouseEvent.MOUSE_CLICKED, now + 2,
+                    0, x, y, 1, false, MouseEvent.BUTTON1))
+            } catch (_: Exception) {
+                throw IllegalStateException("Repeater mouse event dispatch started; request outcome is unknown.")
+            }
         }
     }
 

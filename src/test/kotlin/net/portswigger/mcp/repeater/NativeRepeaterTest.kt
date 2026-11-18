@@ -355,13 +355,17 @@ class NativeRepeaterTest {
 
     @Test
     fun `send refuses request target or control changes made by beforeClick`() = runBlocking {
-        for (change in listOf("request", "target", "replace", "disable", "hide", "busy", "ambiguous", "switch tool")) {
+        for (change in listOf("request", "equivalent fingerprint", "target", "replace", "disable", "hide", "hide page",
+            "replace listener", "reorder listeners", "busy", "ambiguous", "switch tool")) {
             val f = Fixture()
             val editor = f.add("target")
             val before = f.native.read(f.native.tabs().single().tabId)
             val panel = f.tabs.getComponentAt(0) as JPanel
             val send = panel.components.filterIsInstance<JButton>().single { it.text == "Send" }
             val cancel = panel.components.filterIsInstance<JButton>().single { it.text == "Cancel" }
+            if (change == "reorder listeners") {
+                SwingUtilities.invokeAndWait { send.addActionListener { f.sends++ } }
+            }
             var hookRan = false
             assertThrows(IllegalArgumentException::class.java, { runBlocking {
                 f.native.send(before.tabId, before.fingerprint) {
@@ -369,6 +373,12 @@ class NativeRepeaterTest {
                     hookRan = true
                     when (change) {
                         "request" -> editor.text = editor.text.replace("/one", "/changed")
+                        "equivalent fingerprint" -> {
+                            editor.text = editor.text.replace("\r\n", "\n")
+                            assertNotEquals(before.request, editor.text)
+                            assertEquals(before.fingerprint, requestFingerprint(
+                                before.targetHostname, before.targetPort, before.usesHttps, editor.text))
+                        }
                         "target" -> panel.components.filterIsInstance<JLabel>().single().text =
                             "Target: http://different.test:8080"
                         "replace" -> {
@@ -377,6 +387,16 @@ class NativeRepeaterTest {
                         }
                         "disable" -> send.isEnabled = false
                         "hide" -> send.isVisible = false
+                        "hide page" -> f.suite.selectedComponent.isVisible = false
+                        "replace listener" -> {
+                            send.removeActionListener(send.actionListeners.single())
+                            send.addActionListener { f.sends++ }
+                        }
+                        "reorder listeners" -> {
+                            val oldest = send.actionListeners.last()
+                            send.removeActionListener(oldest)
+                            send.addActionListener(oldest)
+                        }
                         "busy" -> cancel.isEnabled = true
                         "ambiguous" -> panel.add(JButton("Send").apply { addActionListener { f.sends++ } })
                         "switch tool" -> f.suite.selectedIndex = 0
@@ -391,14 +411,27 @@ class NativeRepeaterTest {
     @Test
     fun `label based send clicks once only while the original control stays valid`() = runBlocking {
         for (change in listOf("none", "replace panel", "replace label", "disable panel", "disable label",
-            "remove listener", "lose bounds")) {
+            "remove listener", "replace listener", "lose bounds", "mutate on press", "mutate on release")) {
             val f = Fixture()
             f.add("target")
             val panel = f.tabs.getComponentAt(0) as JPanel
             val button = panel.components.filterIsInstance<JButton>().single { it.text == "Send" }
+            val target = panel.components.filterIsInstance<JLabel>().single()
             val label = JLabel("Send")
+            val events = mutableListOf<Int>()
             val listener = object : MouseAdapter() {
+                override fun mousePressed(event: MouseEvent) {
+                    events.add(event.id)
+                    if (change == "mutate on press") target.text = "Target: http://different.test"
+                }
+
+                override fun mouseReleased(event: MouseEvent) {
+                    events.add(event.id)
+                    if (change == "mutate on release") target.text = "Target: http://different.test"
+                }
+
                 override fun mouseClicked(event: MouseEvent) {
+                    events.add(event.id)
                     f.sends++
                 }
             }
@@ -417,6 +450,18 @@ class NativeRepeaterTest {
                     assertEquals(0, f.sends)
                 }
                 assertEquals(1, f.sends)
+                assertEquals(listOf(MouseEvent.MOUSE_PRESSED, MouseEvent.MOUSE_RELEASED, MouseEvent.MOUSE_CLICKED), events)
+                continue
+            }
+            if (change == "mutate on press" || change == "mutate on release") {
+                val failure = assertThrows(IllegalStateException::class.java, {
+                    runBlocking { f.native.send(before.tabId, before.fingerprint) }
+                }, change)
+                assertTrue(failure.message.orEmpty().contains("outcome is unknown"), change)
+                val expected = if (change == "mutate on press") listOf(MouseEvent.MOUSE_PRESSED)
+                    else listOf(MouseEvent.MOUSE_PRESSED, MouseEvent.MOUSE_RELEASED)
+                assertEquals(expected, events, change)
+                assertEquals(0, f.sends, change)
                 continue
             }
             assertThrows(IllegalArgumentException::class.java, { runBlocking {
@@ -437,11 +482,20 @@ class NativeRepeaterTest {
                         "disable panel" -> control.isEnabled = false
                         "disable label" -> label.isEnabled = false
                         "remove listener" -> control.removeMouseListener(listener)
+                        "replace listener" -> {
+                            control.removeMouseListener(listener)
+                            control.addMouseListener(object : MouseAdapter() {
+                                override fun mouseClicked(event: MouseEvent) {
+                                    f.sends++
+                                }
+                            })
+                        }
                         "lose bounds" -> control.setSize(0, 0)
                     }
                 }
             } }, change)
             assertEquals(0, f.sends, change)
+            assertTrue(events.isEmpty(), change)
         }
     }
 
