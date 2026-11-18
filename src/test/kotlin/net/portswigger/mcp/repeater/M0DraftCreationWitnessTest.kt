@@ -134,6 +134,31 @@ class M0DraftCreationWitnessTest {
     }
 
     @Test
+    fun `a capture delivered ahead of a missing disappearance cannot confirm a restored draft`() = runBlocking {
+        val f = Fixture()
+        val witness = M0DraftCreationWitness(marker, f.inventory())
+        lateinit var content: JPanel
+        lateinit var header: java.awt.Component
+        SwingUtilities.invokeAndWait {
+            content = f.add(marker)
+            header = f.tabs.getTabComponentAt(0)
+        }
+        assertEquals(M0DraftEvidence.MARKER_OBSERVED, witness.observe(f.inventory()))
+
+        SwingUtilities.invokeAndWait { f.tabs.removeTabAt(0) }
+        val missing = f.inventory()
+        SwingUtilities.invokeAndWait {
+            f.tabs.addTab(marker, content)
+            f.tabs.setTabComponentAt(0, header)
+        }
+        val restored = f.inventory()
+
+        assertEquals(M0DraftEvidence.UNCONFIRMED, witness.observe(restored))
+        assertEquals(M0DraftEvidence.UNCONFIRMED, witness.observe(missing))
+        assertEquals(M0DraftEvidence.UNCONFIRMED, witness.observe(f.inventory()))
+    }
+
+    @Test
     fun `expiry and unavailable inventory refuse and capture never selects Repeater`() = runBlocking {
         val f = Fixture()
         var now = 0L

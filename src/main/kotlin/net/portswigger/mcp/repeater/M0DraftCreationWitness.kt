@@ -36,6 +36,8 @@ internal class M0DraftCreationWitness(
             current.frame !== before.frame ||
             current.repeaterRoot !== before.repeaterRoot || current.tabPane !== before.tabPane) return reject()
         if (current.sequence <= lastSequence) return M0DraftEvidence.STALE_CAPTURE
+        // An omitted capture could contain the candidate's removal or replacement.
+        if (current.sequence != lastSequence + 1) return reject()
         lastSequence = current.sequence
 
         val marked = current.drafts.filter { it.caption == marker }
