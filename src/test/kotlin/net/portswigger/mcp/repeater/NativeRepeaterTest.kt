@@ -4,6 +4,8 @@ import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import java.awt.BorderLayout
+import java.awt.event.MouseAdapter
+import java.awt.event.MouseEvent
 import javax.swing.*
 
 class NativeRepeaterTest {
@@ -349,6 +351,98 @@ class NativeRepeaterTest {
             f.native.send(before.tabId, before.fingerprint) { f.tabs.removeTabAt(0) }
         } }
         assertEquals(0, f.sends)
+    }
+
+    @Test
+    fun `send refuses request target or control changes made by beforeClick`() = runBlocking {
+        for (change in listOf("request", "target", "replace", "disable", "hide", "busy", "ambiguous", "switch tool")) {
+            val f = Fixture()
+            val editor = f.add("target")
+            val before = f.native.read(f.native.tabs().single().tabId)
+            val panel = f.tabs.getComponentAt(0) as JPanel
+            val send = panel.components.filterIsInstance<JButton>().single { it.text == "Send" }
+            val cancel = panel.components.filterIsInstance<JButton>().single { it.text == "Cancel" }
+            var hookRan = false
+            assertThrows(IllegalArgumentException::class.java, { runBlocking {
+                f.native.send(before.tabId, before.fingerprint) {
+                    assertTrue(SwingUtilities.isEventDispatchThread())
+                    hookRan = true
+                    when (change) {
+                        "request" -> editor.text = editor.text.replace("/one", "/changed")
+                        "target" -> panel.components.filterIsInstance<JLabel>().single().text =
+                            "Target: http://different.test:8080"
+                        "replace" -> {
+                            panel.remove(send)
+                            panel.add(JButton("Send").apply { addActionListener { f.sends++ } })
+                        }
+                        "disable" -> send.isEnabled = false
+                        "hide" -> send.isVisible = false
+                        "busy" -> cancel.isEnabled = true
+                        "ambiguous" -> panel.add(JButton("Send").apply { addActionListener { f.sends++ } })
+                        "switch tool" -> f.suite.selectedIndex = 0
+                    }
+                }
+            } }, change)
+            assertTrue(hookRan, change)
+            assertEquals(0, f.sends, change)
+        }
+    }
+
+    @Test
+    fun `label based send clicks once only while the original control stays valid`() = runBlocking {
+        for (change in listOf("none", "replace panel", "replace label", "disable panel", "disable label",
+            "remove listener", "lose bounds")) {
+            val f = Fixture()
+            f.add("target")
+            val panel = f.tabs.getComponentAt(0) as JPanel
+            val button = panel.components.filterIsInstance<JButton>().single { it.text == "Send" }
+            val label = JLabel("Send")
+            val listener = object : MouseAdapter() {
+                override fun mouseClicked(event: MouseEvent) {
+                    f.sends++
+                }
+            }
+            val control = JPanel().apply {
+                setSize(80, 28)
+                add(label)
+                addMouseListener(listener)
+            }
+            SwingUtilities.invokeAndWait {
+                panel.remove(button)
+                panel.add(control)
+            }
+            val before = f.native.read(f.native.tabs().single().tabId)
+            if (change == "none") {
+                f.native.send(before.tabId, before.fingerprint) {
+                    assertEquals(0, f.sends)
+                }
+                assertEquals(1, f.sends)
+                continue
+            }
+            assertThrows(IllegalArgumentException::class.java, { runBlocking {
+                f.native.send(before.tabId, before.fingerprint) {
+                    when (change) {
+                        "replace panel" -> {
+                            panel.remove(control)
+                            panel.add(JPanel().apply {
+                                setSize(80, 28)
+                                add(label)
+                                addMouseListener(listener)
+                            })
+                        }
+                        "replace label" -> {
+                            control.remove(label)
+                            control.add(JLabel("Send"))
+                        }
+                        "disable panel" -> control.isEnabled = false
+                        "disable label" -> label.isEnabled = false
+                        "remove listener" -> control.removeMouseListener(listener)
+                        "lose bounds" -> control.setSize(0, 0)
+                    }
+                }
+            } }, change)
+            assertEquals(0, f.sends, change)
+        }
     }
 
     @Test

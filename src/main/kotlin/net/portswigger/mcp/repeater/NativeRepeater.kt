@@ -322,39 +322,65 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
 
     suspend fun send(tabId: String, expectedFingerprint: String, beforeClick: () -> Unit = {}) = withContext(Dispatchers.Swing) {
         val selected = select(tabId)
-        val current = snapshot(selected)
-        require(current.fingerprint == expectedFingerprint) {
-            "Repeater request or target changed. Read the tab again before sending."
+        val frame = suiteFrame()
+        val (suiteTabs, repeaterIndex) = locateRepeater(frame)
+        val repeaterRoot = suiteTabs.getComponentAt(repeaterIndex)
+
+        fun verifyReady() {
+            val (currentSuiteTabs, currentIndex) = locateRepeater(frame)
+            require(suiteFrame() === frame && currentSuiteTabs === suiteTabs &&
+                suiteTabs.selectedIndex == currentIndex && suiteTabs.getComponentAt(currentIndex) === repeaterRoot &&
+                (selected.identity.first().pane === repeaterRoot ||
+                    SwingUtilities.isDescendingFrom(selected.identity.first().pane, repeaterRoot))) {
+                "Native Repeater selection changed; no request was sent."
+            }
+            require(snapshot(selected).fingerprint == expectedFingerprint) {
+                "Repeater request or target changed. Read the tab again before sending."
+            }
+            val cancel = components(selected.content).filterIsInstance<AbstractButton>()
+                .filter { visibleWithin(it, selected.content) && it.text == "Cancel" }.toList()
+            require(cancel.size == 1 && !cancel.single().isEnabled) {
+                "Cannot verify that the Repeater tab is idle; no request was sent."
+            }
         }
-        val cancel = components(selected.content).filterIsInstance<AbstractButton>()
-            .filter { visibleWithin(it, selected.content) && it.text == "Cancel" }.toList()
-        require(cancel.size == 1 && !cancel.single().isEnabled) {
-            "Cannot verify that the Repeater tab is idle; no request was sent."
-        }
-        val sendLabels = components(selected.content).filterIsInstance<JLabel>()
-            .filter { visibleWithin(it, selected.content) && it.text == "Send" }.toList()
-        val buttons = components(selected.content).filterIsInstance<AbstractButton>()
-            .filter { visibleWithin(it, selected.content) && it.text == "Send" }.toList()
-        if (buttons.size == 1 && sendLabels.isEmpty()) {
-            require(buttons.single().isEnabled) { "Repeater Send is disabled." }
-            beforeClick()
-            verifySelection(selected.identity)
-            buttons.single().doClick(0)
-        } else {
+
+        fun findSendControl(): Pair<Component, JLabel?> {
+            val sendLabels = components(selected.content).filterIsInstance<JLabel>()
+                .filter { visibleWithin(it, selected.content) && it.text == "Send" }.toList()
+            val buttons = components(selected.content).filterIsInstance<AbstractButton>()
+                .filter { visibleWithin(it, selected.content) && it.text == "Send" }.toList()
+            if (buttons.size == 1 && sendLabels.isEmpty()) {
+                val button = buttons.single()
+                require(button.isEnabled) { "Repeater Send is disabled." }
+                return button to null
+            }
             require(buttons.isEmpty() && sendLabels.size == 1) {
                 "Unsupported or ambiguous Repeater Send control; no request was sent."
             }
             // Burp 2026.10 uses a label inside a clickable panel instead of a JButton.
-            val control = sendLabels.single().parent
-            require(control != null && control.isEnabled && control.mouseListeners.isNotEmpty()) {
+            val label = sendLabels.single()
+            val control = label.parent
+            require(control != null && label.isEnabled && control.isEnabled && control.mouseListeners.isNotEmpty()) {
                 "Unsupported Repeater Send control; no request was sent."
             }
+            require(control.width / 2 > 0 && control.height / 2 > 0) { "Repeater Send control has no usable bounds." }
+            return control to label
+        }
+
+        verifyReady()
+        val (control, label) = findSendControl()
+        beforeClick()
+        verifyReady()
+        val (currentControl, currentLabel) = findSendControl()
+        require(currentControl === control && currentLabel === label) {
+            "Repeater Send control changed; no request was sent."
+        }
+        if (label == null) {
+            (control as AbstractButton).doClick(0)
+        } else {
             val now = System.currentTimeMillis()
             val x = control.width / 2
             val y = control.height / 2
-            require(x > 0 && y > 0) { "Repeater Send control has no usable bounds." }
-            beforeClick()
-            verifySelection(selected.identity)
             control.dispatchEvent(MouseEvent(control, MouseEvent.MOUSE_PRESSED, now,
                 InputEvent.BUTTON1_DOWN_MASK, x, y, 1, false, MouseEvent.BUTTON1))
             control.dispatchEvent(MouseEvent(control, MouseEvent.MOUSE_RELEASED, now + 1,
