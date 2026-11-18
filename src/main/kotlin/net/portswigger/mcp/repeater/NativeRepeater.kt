@@ -268,6 +268,30 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         entries.map { it.description }
     }
 
+    /** Inventory for the isolated creation witness. Requires Repeater already selected. */
+    internal suspend fun draftCreationInventory(): M0DraftInventory = withContext(Dispatchers.Swing) {
+        val frame = suiteFrame()
+        val (suiteTabs, repeaterIndex) = locateRepeater(frame)
+        check(suiteTabs.selectedIndex == repeaterIndex) { "Repeater must already be selected" }
+        val root = suiteTabs.getComponentAt(repeaterIndex)
+        val tabPane = firstTabPanes(root).single()
+        val drafts = inventory(root).map { entry ->
+            // This witness intentionally covers the flat layout only, where
+            // every caption in the observed pane is represented in the inventory.
+            val step = entry.path.single()
+            val index = (0 until step.pane.tabCount).single { step.pane.getTabComponentAt(it) === step.header }
+            val content = step.pane.getComponentAt(index)
+            check(step.pane === tabPane && (step.pane === root || SwingUtilities.isDescendingFrom(step.pane, root)))
+            check(step.pane.getTitleAt(index) == entry.description.name)
+            M0DraftObservation(entry.description.name, step.header, content)
+        }
+        val (currentSuiteTabs, currentIndex) = locateRepeater(frame)
+        check(suiteFrame() === frame && currentSuiteTabs === suiteTabs && currentIndex == repeaterIndex &&
+            firstTabPanes(root).singleOrNull() === tabPane && suiteTabs.selectedIndex == repeaterIndex &&
+            suiteTabs.getComponentAt(repeaterIndex) === root)
+        M0DraftInventory(frame, root, tabPane, drafts)
+    }
+
     suspend fun read(tabId: String): RepeaterSnapshot {
         var current = withContext(Dispatchers.Swing) { snapshot(select(tabId)) }
         // Burp populates a selected tab's response editor asynchronously. Yield without blocking Swing.
@@ -358,14 +382,21 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         }
     }
 
-    private fun inventory(): List<Entry> {
-        val roots = components(suiteFrame()).filterIsInstance<JTabbedPane>()
+    private fun locateRepeater(frame: Component): Pair<JTabbedPane, Int> {
+        val roots = components(frame).filterIsInstance<JTabbedPane>()
             .flatMap { pane -> (0 until pane.tabCount).asSequence()
                 .filter { pane.getTitleAt(it) == "Repeater" }.map { pane to it } }.toList()
         require(roots.size == 1) { "Cannot uniquely locate native Repeater in the main Burp window." }
-        val (suiteTabs, repeaterIndex) = roots.single()
+        return roots.single()
+    }
+
+    private fun inventory(): List<Entry> {
+        val (suiteTabs, repeaterIndex) = locateRepeater(suiteFrame())
         suiteTabs.selectedIndex = repeaterIndex
-        val root = suiteTabs.getComponentAt(repeaterIndex)
+        return inventory(suiteTabs.getComponentAt(repeaterIndex))
+    }
+
+    private fun inventory(root: Component): List<Entry> {
         val panes = firstTabPanes(root)
         if (panes.isEmpty()) return emptyList()
         require(panes.size == 1) { "Unsupported Repeater tab layout." }
