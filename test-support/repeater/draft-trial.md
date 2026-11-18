@@ -1,6 +1,12 @@
 # Disposable Repeater draft identity trial
 
-This test extension has a single local action that opens a fixed synthetic HTTP/1.1 draft in Repeater. Its sole destination is the reserved loopback fixture address at `127.0.0.1:18180`. No listener is needed. The archive includes the reviewed marker witness, the test entry point and Kotlin's standard library. The regular build and MCP extension are separate.
+This test extension has one local action that copies the visible draft from a selected synthetic HTTP/1.1 Repeater tab. The supported source is the exact request below with CRLF line endings and a blank line after the Host header. Its visible target must be `http://127.0.0.1:18180`. No listener is needed. The archive includes the reviewed marker witness, the test entry point and Kotlin's standard library. The regular build and MCP extension are separate.
+
+```http
+GET /m0-draft-witness HTTP/1.1
+Host: 127.0.0.1:18180
+
+```
 
 ## Reproduce the archive offline
 
@@ -15,10 +21,10 @@ Record the Git SHA, Java version, archive hash and entry list. The only project 
 
 ## Verification after review and isolation release
 
-Use a disposable project with an already selected flat Repeater pane and at least one unrelated synthetic request tab. The verifier should record the existing draft and select **Create one synthetic M0 draft (local only)** once from a Repeater context menu. The action creates one request through the official draft-only API with a generated temporary caption. Keep the original tab and the pane in place while the witness samples them. A verifier can open the context menu and choose **Cancel draft identity observation** while the timer is active, or unload the test extension. An unconfirmed creation may leave the synthetic draft visible.
+Use a disposable project with an already selected flat Repeater pane. Create the exact synthetic source as an unsent draft and record its editor text, target and empty response pane. In a fresh trial, also create an unrelated draft with the same display name as the source. Select the source and choose **Clone selected synthetic M0 draft (local only)** from its Repeater context menu. The action rechecks the source header, content, editor text and target before copying the sampled text into one new draft through Montoya. The clone receives a generated marker caption.
 
-In extension output, compare `firstMarkerCapture` and `secondMarkerCapture`. They must be consecutive and distinct. A positive `baselineIdentitiesPreserved` means the unrelated header and content identities were present in each observed inventory. These are discrete EDT observations. They cannot prove that tab identities or content stayed unchanged between captures.
+For a positive `CLONE_CONFIRMED` result, check that `firstMarkerCapture` and `secondMarkerCapture` are consecutive and distinct. Verify the exact visible editor text and target on the marked clone, then inspect the original and the unrelated tab. They should still show their own drafts. All response panes should remain empty.
 
-`editorHashEqual` compares the full text of a uniquely identified visible editor to the fixed draft text, with no normalization. `destinationEqual` compares the visible target label. Unsupported layout or unavailable editor evidence may produce `unknown`. A line-ending conversion can return `false`. These comparisons are optional evidence about the visible editor. Neither exact model bytes nor effective settings are established by this trial. The archive emits only the generated caption, counts, fixed labels and equality results.
+In separate fresh trials, try to interleave an unrelated tab after creation starts, change source selection or text between opening the menu and choosing the action, or cancel observation if the timer remains active. An unrelated tab with a duplicate display name must never be reported as the clone. A stale source must prevent creation. A duplicate or replaced marker, or a marked draft that cannot be read in the current view, must refuse confirmation. Choose **Cancel draft identity observation** while the timer is active or unload the test extension. Cancellation stops observation and may leave a draft that was already created. The action is consumed until the extension reloads. The harness does not retry, rename, or remove candidates.
 
-A gap, duplicate or lost/replaced marker, timeout, cancellation or inventory failure returns `UNCONFIRMED`. The action is consumed until the extension is reloaded. Final naming, native rename, cloning and production routing require separate evidence.
+The output contains a generated caption, counts and comparison results. `baselineIdentitiesPreserved` and the readback describe discrete Swing observations. They establish neither continuous ownership nor effective execution settings or exact model bytes. Unsupported layouts and unavailable, ambiguous, or changed readback report `UNCONFIRMED`. Production naming, native rename and MCP registration remain outside this trial.

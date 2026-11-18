@@ -2,6 +2,7 @@ package net.portswigger.mcp.repeater
 
 import burp.api.montoya.BurpExtension
 import burp.api.montoya.MontoyaApi
+import burp.api.montoya.core.ByteArray
 import burp.api.montoya.core.ToolType
 import burp.api.montoya.http.HttpService
 import burp.api.montoya.http.message.requests.HttpRequest
@@ -9,7 +10,6 @@ import burp.api.montoya.ui.contextmenu.ContextMenuEvent
 import burp.api.montoya.ui.contextmenu.ContextMenuItemsProvider
 import java.awt.Component
 import java.awt.Container
-import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.swing.JLabel
@@ -41,31 +41,42 @@ private class DraftTrial(private val api: MontoyaApi) : ContextMenuItemsProvider
         return when {
             timer != null -> listOf(JMenuItem("Cancel draft identity observation").apply { addActionListener { cancel() } })
             used -> emptyList()
-            else -> listOf(JMenuItem("Create one synthetic M0 draft (local only)").apply { addActionListener { start() } })
+            else -> {
+                val sourceDraft = runCatching { DraftTrialSnapshot.selected(inventory()) }.getOrNull()
+                    ?: return emptyList()
+                if (!sourceDraft.isSupported()) return emptyList()
+                listOf(JMenuItem("Clone selected synthetic M0 draft (local only)").apply {
+                    addActionListener { start(sourceDraft) }
+                })
+            }
         }
     }
 
-    private fun start() {
+    private fun start(sourceDraft: DraftTrialSnapshot) {
         check(SwingUtilities.isEventDispatchThread())
         if (used || unloaded.get()) return
         used = true
         val marker = "M0-draft-${UUID.randomUUID()}"
         try {
+            val bytes = sourceDraft.text.toByteArray(Charsets.US_ASCII)
+            val request = HttpRequest.httpRequest(HttpService.httpService("127.0.0.1", 18180, false), ByteArray.byteArray(*bytes))
+            val service = request.httpService()
+            check(service.host() == "127.0.0.1" && service.port() == 18180 && !service.secure() &&
+                request.toByteArray().getBytes().contentEquals(bytes))
             val before = inventory()
-            if (before.drafts.none { it.content != null } || before.drafts.any { it.caption == marker }) {
-                log("UNCONFIRMED baseline_not_usable")
+            if (!sourceDraft.sameSource(DraftTrialSnapshot.selected(before)) || before.drafts.any { it.caption == marker }) {
+                log("UNCONFIRMED source_changed_or_marker_collision")
                 return
             }
             val witness = M0DraftCreationWitness(marker, before)
             var firstMarkerSequence = 0L
-            val request = HttpRequest.httpRequest(HttpService.httpService("127.0.0.1", 18180, false), REQUEST)
             if (unloaded.get()) {
                 finish("UNCONFIRMED canceled")
                 return
             }
             // This Montoya method opens a draft in Repeater. This harness has no Send action.
             api.repeater().sendToRepeater(request, marker)
-            log("STARTED caption=$marker baselineRows=${before.drafts.size}")
+            log("STARTED baselineRows=${before.drafts.size}")
             timer = Timer(50) {
                 try {
                     if (unloaded.get()) {
@@ -85,13 +96,18 @@ private class DraftTrial(private val api: MontoyaApi) : ContextMenuItemsProvider
                         M0DraftEvidence.MARKER_OBSERVED -> firstMarkerSequence = capture.sequence
                         M0DraftEvidence.STABLE_MARKER -> {
                             val draft = capture.drafts.single { it.caption == marker }
-                            val comparison = compareVisibleDraft(draft, capture)
+                            val observed = DraftTrialSnapshot.selected(capture)
                             if (unloaded.get()) {
                                 cancel()
                                 return@Timer
                             }
-                            finish("STABLE_MARKER caption=$marker firstMarkerCapture=$firstMarkerSequence " +
-                                "secondMarkerCapture=${capture.sequence} baselineIdentitiesPreserved=true $comparison")
+                            if (!sourceDraft.matchesClone(draft, observed)) {
+                                finish("UNCONFIRMED clone_readback_mismatch_or_unavailable")
+                                return@Timer
+                            }
+                            finish("CLONE_CONFIRMED caption=$marker firstMarkerCapture=$firstMarkerSequence " +
+                                "secondMarkerCapture=${capture.sequence} baselineIdentitiesPreserved=true " +
+                                "editorTextEqual=true destinationEqual=true")
                         }
                         else -> finish("UNCONFIRMED witness=$result")
                     }
@@ -139,39 +155,13 @@ private class DraftTrial(private val api: MontoyaApi) : ContextMenuItemsProvider
             check(components(content).none { it is JTabbedPane && it.javaClass == pane.javaClass })
             M0DraftObservation(pane.getTitleAt(row), header, content)
         }
-        check(suite.selectedIndex == index && suite.getComponentAt(index) === root && firstTabPanes(root).single() === pane)
+        check(api.userInterface().swingUtils().suiteFrame() === frame &&
+            suite.selectedIndex == index && suite.getComponentAt(index) === root && firstTabPanes(root).single() === pane)
         check(pane.tabCount == rows.size && rows.indices.all { row ->
             pane.getTitleAt(row) == rows[row].caption && pane.getTabComponentAt(row) === rows[row].header &&
                 pane.getComponentAt(row) === rows[row].content
         })
         return M0DraftInventory(source, ++sequence, frame, root, pane, rows)
-    }
-
-    /** Optional observations from the already showing draft. No view or tab switch. */
-    private fun compareVisibleDraft(draft: M0DraftObservation, inventory: M0DraftInventory): String {
-        val content = checkNotNull(draft.content)
-        val pane = inventory.tabPane
-        val index = pane.selectedIndex
-        if (index < 0 || pane.getTabComponentAt(index) !== draft.header || pane.selectedComponent !== content)
-            return "editorHashEqual=unknown destinationEqual=unknown"
-        val editor = components(content).filterIsInstance<JTextArea>().singleOrNull {
-            it.isShowing && it.isEditable && REQUEST_START.containsMatchIn(it.text)
-        }
-        val target = components(content).filterIsInstance<JLabel>().singleOrNull {
-            it.isShowing && it.text?.startsWith("Target: ") == true
-        }
-        val editorEqual = editor?.text?.let { hash(it).contentEquals(hash(REQUEST)) }
-        val destinationEqual = target?.text?.let { it == TARGET }
-        if (pane.selectedIndex != index || pane.getTabComponentAt(index) !== draft.header ||
-            pane.selectedComponent !== content) return "editorHashEqual=unknown destinationEqual=unknown"
-        return "editorHashEqual=${editorEqual ?: "unknown"} destinationEqual=${destinationEqual ?: "unknown"}"
-    }
-
-    private fun hash(value: String) = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
-
-    private fun components(root: Component): Sequence<Component> = sequence {
-        yield(root)
-        if (root is Container) for (child in root.components) yieldAll(components(child))
     }
 
     private fun firstTabPanes(root: Component): List<JTabbedPane> = when (root) {
@@ -180,9 +170,61 @@ private class DraftTrial(private val api: MontoyaApi) : ContextMenuItemsProvider
         else -> emptyList()
     }
 
-    private companion object {
-        const val REQUEST = "GET /m0-draft-witness HTTP/1.1\r\nHost: 127.0.0.1:18180\r\n\r\n"
-        const val TARGET = "Target: http://127.0.0.1:18180"
-        val REQUEST_START = Regex("\\A[^\\r\\n]+ HTTP/1\\.1(?:\\r?\\n|$)")
+}
+
+internal class DraftTrialSnapshot private constructor(
+    private val inventory: M0DraftInventory,
+    private val draft: M0DraftObservation,
+    val text: String,
+    private val target: String
+) {
+    fun isSupported() = text == REQUEST && target == TARGET
+
+    fun sameSource(current: DraftTrialSnapshot?): Boolean =
+        current != null && samePane(current) && current.owns(draft) && current.text == text && current.target == target
+
+    fun matchesClone(marked: M0DraftObservation, current: DraftTrialSnapshot?): Boolean =
+        current != null && samePane(current) && current.owns(marked) && !current.owns(draft) &&
+            current.text == text && current.target == target
+
+    private fun samePane(other: DraftTrialSnapshot) =
+        inventory.source === other.inventory.source && inventory.frame === other.inventory.frame &&
+            inventory.repeaterRoot === other.inventory.repeaterRoot && inventory.tabPane === other.inventory.tabPane
+
+    private fun owns(row: M0DraftObservation) = draft.header === row.header && draft.content === row.content
+
+    companion object {
+        private const val REQUEST = "GET /m0-draft-witness HTTP/1.1\r\nHost: 127.0.0.1:18180\r\n\r\n"
+        private const val TARGET = "Target: http://127.0.0.1:18180"
+        private val REQUEST_START = Regex("\\A[^\\r\\n]+ HTTP/1\\.1(?:\\r?\\n|$)")
+
+        /** Only sample the currently visible row. Never select the source or the clone. */
+        fun selected(inventory: M0DraftInventory): DraftTrialSnapshot? {
+            val pane = inventory.tabPane
+            val index = pane.selectedIndex
+            val row = inventory.drafts.getOrNull(index) ?: return null
+            val content = row.content ?: return null
+            if (inventory.drafts.count { it.header === row.header } != 1 ||
+                inventory.drafts.count { it.content === content } != 1) return null
+            fun stillSelected() = pane.selectedIndex == index && pane.getTabComponentAt(index) === row.header &&
+                pane.selectedComponent === content && pane.getTitleAt(index) == row.caption
+            if (!stillSelected()) return null
+            val editor = components(content).filterIsInstance<JTextArea>().singleOrNull {
+                it.isShowing && it.isEditable && REQUEST_START.containsMatchIn(it.text)
+            } ?: return null
+            val target = components(content).filterIsInstance<JLabel>().singleOrNull {
+                it.isShowing && it.text?.startsWith("Target: ") == true
+            } ?: return null
+            val text = editor.text
+            val label = target.text ?: return null
+            if (!stillSelected() || !editor.isShowing || !target.isShowing ||
+                !SwingUtilities.isDescendingFrom(editor, content) || !SwingUtilities.isDescendingFrom(target, content)) return null
+            return DraftTrialSnapshot(inventory, row, text, label)
+        }
     }
+}
+
+private fun components(root: Component): Sequence<Component> = sequence {
+    yield(root)
+    if (root is Container) for (child in root.components) yieldAll(components(child))
 }

@@ -1,15 +1,20 @@
 package net.portswigger.mcp.repeater
 
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import net.portswigger.mcp.Swing
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.JTabbedPane
+import javax.swing.JTextArea
 import javax.swing.SwingUtilities
 
 class M0DraftCreationWitnessTest {
     private val marker = "draft-marker"
+    private val draftText = "GET /m0-draft-witness HTTP/1.1\r\nHost: 127.0.0.1:18180\r\n\r\n"
 
     private class Fixture {
         val tabs = JTabbedPane()
@@ -23,6 +28,66 @@ class M0DraftCreationWitnessTest {
             return content
         }
         suspend fun inventory() = native.draftCreationInventory()
+    }
+
+    private fun addVisibleDraft(f: Fixture, caption: String): Pair<JTextArea, JLabel> {
+        val request = object : JTextArea(draftText) {
+            override fun isShowing() = isVisible
+        }
+        val target = object : JLabel("Target: http://127.0.0.1:18180") {
+            override fun isShowing() = isVisible
+        }
+        f.add(caption).apply { add(request); add(target) }
+        return request to target
+    }
+
+    @Test
+    fun `clone source is pinned by identity and content across duplicate captions`() = runBlocking {
+        val f = Fixture()
+        withContext(Dispatchers.Swing) {
+            val (editor, target) = addVisibleDraft(f, "Duplicate")
+            addVisibleDraft(f, "Duplicate")
+            val source = checkNotNull(DraftTrialSnapshot.selected(f.inventory()))
+            assertTrue(source.isSupported())
+            assertTrue(source.sameSource(DraftTrialSnapshot.selected(f.inventory())))
+
+            f.tabs.selectedIndex = 1
+            assertFalse(source.sameSource(DraftTrialSnapshot.selected(f.inventory())))
+            f.tabs.selectedIndex = 0
+            editor.text = draftText.replace("/m0-", "/changed-")
+            assertFalse(source.sameSource(DraftTrialSnapshot.selected(f.inventory())))
+            editor.text = draftText
+            target.text = "Target: http://127.0.0.1:18181"
+            assertFalse(source.sameSource(DraftTrialSnapshot.selected(f.inventory())))
+        }
+    }
+
+    @Test
+    fun `clone confirmation requires marked row and exact readback across interleaved tabs`() = runBlocking {
+        val f = Fixture()
+        withContext(Dispatchers.Swing) {
+            addVisibleDraft(f, "Duplicate")
+            val baseline = f.inventory()
+            val source = checkNotNull(DraftTrialSnapshot.selected(baseline))
+            val witness = M0DraftCreationWitness(marker, baseline)
+            addVisibleDraft(f, "Duplicate")
+            assertEquals(M0DraftEvidence.WAITING, witness.observe(f.inventory()))
+            val (clone, _) = addVisibleDraft(f, marker)
+            assertEquals(M0DraftEvidence.MARKER_OBSERVED, witness.observe(f.inventory()))
+
+            f.tabs.selectedIndex = 1
+            val capture = f.inventory()
+            val marked = capture.drafts.single { it.caption == marker }
+            assertEquals(M0DraftEvidence.STABLE_MARKER, witness.observe(capture))
+            assertFalse(source.matchesClone(marked, DraftTrialSnapshot.selected(capture)))
+            f.tabs.selectedIndex = 2
+            clone.text = draftText.replace("\r\n", "\n")
+            assertFalse(source.matchesClone(marked, DraftTrialSnapshot.selected(f.inventory())))
+            clone.text = draftText
+            assertTrue(source.matchesClone(marked, DraftTrialSnapshot.selected(f.inventory())))
+            clone.isVisible = false
+            assertNull(DraftTrialSnapshot.selected(f.inventory()))
+        }
     }
 
     @Test
