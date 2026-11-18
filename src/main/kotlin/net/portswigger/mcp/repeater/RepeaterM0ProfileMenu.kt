@@ -113,6 +113,7 @@ internal suspend fun inspectM0ProfileMenuTarget(target: M0ContextTarget, permiss
                 return@withContext result("unknown", "SELECTED_PATH_NOT_OWNED_BY_POPUP")
             opener = openerMetadata(invoker, ::guard)
             val validations = mutableListOf<() -> Boolean>()
+            var restoreLabelCount = 0
             val seen = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Component, Boolean>())
             fun walk(popup: JPopupMenu, parentKeys: List<String>, depth: Int) {
                 if (depth > 6) { capped = true; return }
@@ -129,18 +130,36 @@ internal suspend fun inspectM0ProfileMenuTarget(target: M0ContextTarget, permiss
                     if (!seen.add(child)) throw MenuStop("CYCLIC_OR_SHARED_MENU_COMPONENT")
                     if (read { child.parent !== popup }) throw MenuStop("MENU_CHILD_OWNER_UNCONFIRMED")
                     if (child is JSeparator) continue
-                    val label = read { menuKey((child as? AbstractButton)?.text ?: (child as? JLabel)?.text) }
+                    val text = read { menuText(child) }
+                    val restoreLabel = isRestoreLabel(text)
+                    if (restoreLabel) restoreLabelCount++
+                    val restoreLeaf = restoreLabel && popup === root &&
+                        (child is JButton || child is JMenuItem && child !is JMenu &&
+                            child !is JCheckBoxMenuItem && child !is JRadioButtonMenuItem)
+                    val restoreVisible = restoreLeaf && read { child.isVisible && child.isShowing }
+                    val restoreName = if (restoreVisible) read { child.accessibleContext?.accessibleName } else null
+                    val restore = restoreVisible && (restoreName.isNullOrBlank() || isRestoreLabel(restoreName))
+                    val label = if (restore) RESTORE_KEY else menuKey(text)
                     val kind = publicKind(child)
                     val enabled = read { child.isEnabled }
                     val selected = read { (child as? AbstractButton)?.isSelected }
                     val checked = read { itemState(child, AccessibleState.CHECKED) }
                     val accessibleSelected = read { itemState(child, AccessibleState.SELECTED) }
-                    if (label == null || kind !in setOf("MENU", "CHECKBOX", "RADIO", "ITEM") ||
+                    if (label == null || !restore && kind !in setOf("MENU", "CHECKBOX", "RADIO", "ITEM") ||
                         label in VALUE_KEYS && kind !in setOf("CHECKBOX", "RADIO")) unknown++
-                    if (label != null) nodes += M0ProfileMenuNode(label, parentKeys, kind, enabled, selected, checked, accessibleSelected,
-                        if (kind in setOf("CHECKBOX", "RADIO")) "public_check_or_radio_model" else "navigation_or_custom_semantics_unverified")
+                    if (label != null) {
+                        nodes += if (restore) M0ProfileMenuNode(label, parentKeys, kind, enabled, null, null, null,
+                            "visible_restore_action_enabled_state")
+                        else M0ProfileMenuNode(label, parentKeys, kind, enabled, selected, checked, accessibleSelected,
+                            if (kind in setOf("CHECKBOX", "RADIO")) "public_check_or_radio_model" else "navigation_or_custom_semantics_unverified")
+                    }
                     validations += {
-                        read { child.parent === popup } && read { menuKey((child as? AbstractButton)?.text ?: (child as? JLabel)?.text) == label } &&
+                        read { child.parent === popup } && read {
+                            val current = menuText(child)
+                            if (restoreLabel) current == text else !isRestoreLabel(current) && menuKey(current) == label
+                        } &&
+                            (!restoreLeaf || read { (child.isVisible && child.isShowing) == restoreVisible }) &&
+                            (!restoreVisible || read { child.accessibleContext?.accessibleName == restoreName }) &&
                             read { child.isEnabled == enabled } && read { (child as? AbstractButton)?.isSelected == selected } &&
                             read { itemState(child, AccessibleState.CHECKED) == checked } &&
                             read { itemState(child, AccessibleState.SELECTED) == accessibleSelected }
@@ -162,6 +181,8 @@ internal suspend fun inspectM0ProfileMenuTarget(target: M0ContextTarget, permiss
             if (openerMetadata(invoker, ::guard) != opener) return@withContext result("unknown", "OPENER_ATTRIBUTES_CHANGED")
             if (!validations.all { it() }) return@withContext result("unknown", "MENU_STATE_CHANGED_DURING_READ")
             guard()
+            if (restoreLabelCount > 1) return@withContext result("unknown", "AMBIGUOUS_MENU_STATE")
+            if (capped) nodes.removeAll { it.key == RESTORE_KEY }
             if (ambiguousMenu(nodes)) return@withContext result("unknown", "AMBIGUOUS_MENU_STATE")
             val complete = !capped && lazy == 0 && unknown == 0 && hasProfileSignature(nodes) &&
                 nodes.count { it.parentKeys == listOf("FOLLOW_REDIRECTIONS") && it.key in REDIRECT_KEYS && it.selectedModel == true } == 1
@@ -219,6 +240,12 @@ private fun openerKey(text: String?): String? = when (text?.trim()?.lowercase(Lo
 }
 
 private fun menuKey(text: String?): String? = MENU_KEYS[text?.trim()?.lowercase(Locale.ROOT)]
+private fun menuText(child: Component): String? = (child as? AbstractButton)?.text ?: (child as? JLabel)?.text
+private const val RESTORE_KEY = "RESTORE_GLOBAL_DEFAULT"
+private fun isRestoreLabel(text: String?) = when (text?.trim()?.lowercase(Locale.ROOT)) {
+    "restore global default", "restore global defaults" -> true
+    else -> false
+}
 private val VALUE_KEYS = setOf("UPDATE_CONTENT_LENGTH", "NORMALIZE_LINE_ENDINGS", "NEVER", "ALWAYS", "ON_SITE_ONLY",
     "IN_SCOPE_ONLY", "PROCESS_REDIRECT_COOKIES", "HTTP2_ALPN_OVERRIDE", "HTTP1_CONNECTION_REUSE", "HTTP2_CONNECTION_REUSE",
     "STRIP_HTTP2_CONNECTION", "HTTP1", "HTTP1_1", "HTTP2", "SEND_CURRENT_TAB", "SEND_GROUP_SINGLE_CONNECTION",
@@ -227,7 +254,7 @@ private val MENU_KEYS = mapOf(
     "update content-length" to "UPDATE_CONTENT_LENGTH", "normalize line endings" to "NORMALIZE_LINE_ENDINGS",
     "normalize http/1 line endings" to "NORMALIZE_LINE_ENDINGS", "follow redirections" to "FOLLOW_REDIRECTIONS",
     "never" to "NEVER", "always" to "ALWAYS", "on-site only" to "ON_SITE_ONLY", "in-scope only" to "IN_SCOPE_ONLY",
-    "process cookies in redirections" to "PROCESS_REDIRECT_COOKIES", "restore global default" to "RESTORE_GLOBAL_DEFAULT",
+    "process cookies in redirections" to "PROCESS_REDIRECT_COOKIES",
     "allow http/2 alpn override" to "HTTP2_ALPN_OVERRIDE", "enable http/1 connection reuse" to "HTTP1_CONNECTION_REUSE",
     "enable http/2 connection reuse" to "HTTP2_CONNECTION_REUSE", "strip connection header over http/2" to "STRIP_HTTP2_CONNECTION",
     "remove connection header over http/2" to "STRIP_HTTP2_CONNECTION", "http/1" to "HTTP1", "http/1.1" to "HTTP1_1", "http/2" to "HTTP2",

@@ -34,6 +34,9 @@ class RepeaterM0ProfileMenuTest {
             return super.getToolTipText()
         }
     }
+    private class RestoreItem(text: String) : JMenuItem(text) {
+        override fun isShowing() = isVisible
+    }
     private class PassiveMenu(text: String) : JMenu(text) {
         fun materializeForTest() = super.getPopupMenu()
         override fun getPopupMenu(): JPopupMenu = error("Inspection must not call getPopupMenu")
@@ -79,6 +82,7 @@ class RepeaterM0ProfileMenuTest {
         val redirectPopup = showOwnedPopup(follow)
         val never = JRadioButtonMenuItem("Never", true).apply { isEnabled = false }
         val always = JRadioButtonMenuItem("Always", false)
+        val restore = RestoreItem("Restore global default").apply { isEnabled = false }
         var owned = true
         var permitted = true
         var mutations = 0
@@ -91,18 +95,64 @@ class RepeaterM0ProfileMenuTest {
         }) { false }
         init {
             root.add(update); root.add(follow); redirectPopup.add(never); redirectPopup.add(always)
-            root.add(JMenuItem("Restore global default").apply { isEnabled = false })
+            root.add(restore)
             root.addPopupMenuListener(object : PopupMenuListener {
                 override fun popupMenuWillBecomeVisible(e: PopupMenuEvent) { mutations++ }
                 override fun popupMenuWillBecomeInvisible(e: PopupMenuEvent) { mutations++ }
                 override fun popupMenuCanceled(e: PopupMenuEvent) { mutations++ }
             })
-            listOf(update, follow, never, always).forEach {
+            listOf(update, follow, never, always, restore).forEach {
                 it.addActionListener { mutations++ }; it.model.addChangeListener { mutations++ }
             }
             update.selectedReads = 0
         }
         suspend fun read() = inspectM0ProfileMenuTarget(target, { permitted }, { path })
+    }
+
+    @Test fun `singular and plural visible restore leaves report only their enabled state`() = runBlocking {
+        for (caption in listOf("Restore global default", "Restore global defaults")) {
+            for (enabled in listOf(false, true)) {
+                val f = Fixture()
+                f.restore.text = caption
+                f.restore.isEnabled = enabled
+                val mutationsBeforeRead = f.mutations
+                val result = f.read()
+                val node = result.recognizedNodes.single { it.key == "RESTORE_GLOBAL_DEFAULT" }
+                assertEquals(enabled, node.enabled)
+                assertTrue(node.parentKeys.isEmpty())
+                assertEquals("visible_restore_action_enabled_state", node.selectionMeaning)
+                assertNull(node.selectedModel)
+                assertFalse(result.inheritanceVerified || result.effectiveProfileVerified)
+                assertEquals(mutationsBeforeRead, f.mutations)
+            }
+        }
+    }
+
+    @Test fun `restore state stays unknown for misleading or unstable candidates`() = runBlocking {
+        for (scenario in listOf("suffix", "hidden", "nested", "label", "duplicate", "contradiction", "wrong-owner", "stale")) {
+            val f = Fixture()
+            f.restore.text = "Restore global defaults"
+            when (scenario) {
+                "suffix" -> f.restore.text += " extra"
+                "hidden" -> f.restore.isVisible = false
+                "nested" -> f.redirectPopup.add(f.restore)
+                "label" -> {
+                    f.root.remove(f.restore)
+                    f.root.add(JLabel("Restore global defaults"))
+                }
+                "duplicate" -> f.root.add(RestoreItem("Restore global default"))
+                "contradiction" -> f.restore.accessibleContext.accessibleName = "Another action"
+                "wrong-owner" -> f.root.invoker = HookGear()
+                "stale" -> {
+                    var reads = 0
+                    f.gear.tooltipHook = { if (++reads == 2) f.restore.isEnabled = true }
+                }
+            }
+            val result = f.read()
+            assertEquals("unknown", result.status, scenario)
+            assertTrue(result.recognizedNodes.none { it.key == "RESTORE_GLOBAL_DEFAULT" }, scenario)
+            assertFalse(result.inheritanceVerified || result.menuMutationAttempted, scenario)
+        }
     }
 
     @Test fun `popup with only an invoker pointer cannot stand in for the menus owned popup`() = runBlocking {
