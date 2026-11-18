@@ -15,6 +15,8 @@ internal class M0ActionBar private constructor(
     private val cancel: AbstractButton, private val targetText: String, private val destination: URI,
     private val paths: List<List<Component>>
 ) {
+    fun containsControl(component: Component) = ready() && (component === bar || SwingUtilities.isDescendingFrom(component, bar))
+    fun isBar(component: Component) = component === bar
     fun matchesService(host: String, port: Int, tls: Boolean): Boolean =
         destination.host.equals(host, ignoreCase = true) && (destination.scheme == "https") == tls &&
             (destination.port.takeIf { it >= 0 } ?: if (tls) 443 else 80) == port

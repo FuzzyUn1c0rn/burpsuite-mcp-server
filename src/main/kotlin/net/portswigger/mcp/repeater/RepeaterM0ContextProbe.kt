@@ -32,6 +32,7 @@ internal class M0ContextTarget(
     val describeMutationReadiness: (() -> M0NativeReadiness)? = null,
     val matchesNativeService: (String, Int, Boolean) -> Boolean = { _, _, _ -> true },
     val automaticSource: JTable? = null,
+    val captureProfileMenuInvoker: ((Component) -> M0ProfileMenuInvokerLease)? = null,
     val ownsSource: (Component) -> Boolean
 )
 

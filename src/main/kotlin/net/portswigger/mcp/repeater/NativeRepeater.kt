@@ -99,7 +99,25 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         fun tableValid() = requestRegion != null && hexTable != null && regionValid() &&
             visibleTables(requestRegion).singleOrNull() === hexTable
         val actionBar = M0ActionBar.capture(selected.content, requestOwner, responseOwner)
-        M0ContextTarget(tabId, viewName, automaticSource = hexTable, canMutateNow = {
+        M0ContextTarget(tabId, viewName, automaticSource = hexTable, captureProfileMenuInvoker = { invoker ->
+            check(SwingUtilities.isEventDispatchThread())
+            val tabValid = try { verifySelection(selected.identity); true } catch (_: Exception) { false }
+            val withinTab = invoker === selected.content || SwingUtilities.isDescendingFrom(invoker, selected.content)
+            val invokerPath = if (withinTab) pathTo(invoker, selected.content) else emptyList()
+            val inRequest = invoker === requestOwner || SwingUtilities.isDescendingFrom(invoker, requestOwner)
+            val inResponse = invoker === responseOwner || SwingUtilities.isDescendingFrom(invoker, responseOwner)
+            val withinBar = actionBar?.containsControl(invoker) == true
+            val ownership = M0ProfileMenuOwnership(tabValid, boundaryValid(), withinTab, inRequest, inResponse,
+                actionBar != null, withinBar, actionBar?.isBar(invoker) == true)
+            M0ProfileMenuInvokerLease(ownership) {
+                check(SwingUtilities.isEventDispatchThread())
+                try {
+                    verifySelection(selected.identity)
+                    withinTab && invokerPath.isNotEmpty() && pathValid(invokerPath) && boundaryValid() &&
+                        !inRequest && !inResponse && actionBar?.containsControl(invoker) == true
+                } catch (_: Exception) { false }
+            }
+        }, canMutateNow = {
             check(SwingUtilities.isEventDispatchThread())
             verifySelection(selected.identity)
             boundaryValid() && actionBar?.ready() == true

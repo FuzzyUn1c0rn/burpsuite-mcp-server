@@ -20,6 +20,38 @@ class RepeaterPermissionTest {
     }
 
     @Test
+    fun `profile read rechecks the original allow-once decision without prompting again`() = runBlocking {
+        val config = mockk<McpConfig>()
+        var always = false
+        every { config.requireDataAccessApproval } returns true
+        every { config.alwaysAllowRepeater } answers { always }
+        val approval = mockk<DataAccessApprovalHandler>()
+        coEvery { approval.requestDataAccess(DataAccessType.REPEATER, config) } returns true
+        DataAccessSecurity.approvalHandler = approval
+        val permitted = approveM0ProfileMenuRead(config)
+        assertTrue(permitted())
+        assertTrue(permitted())
+        always = true
+        assertFalse(permitted())
+        coVerify(exactly = 1) { approval.requestDataAccess(DataAccessType.REPEATER, config) }
+    }
+
+    @Test
+    fun `profile read stops honoring revoked persistent approval`() = runBlocking {
+        val config = mockk<McpConfig>()
+        var always = true
+        every { config.requireDataAccessApproval } returns true
+        every { config.alwaysAllowRepeater } answers { always }
+        val approval = mockk<DataAccessApprovalHandler>()
+        DataAccessSecurity.approvalHandler = approval
+        val permitted = approveM0ProfileMenuRead(config)
+        assertTrue(permitted())
+        always = false
+        assertFalse(permitted())
+        coVerify(exactly = 0) { approval.requestDataAccess(any(), any()) }
+    }
+
+    @Test
     fun `Repeater needs its own data approval`() = runBlocking {
         val config = mockk<McpConfig>(relaxed = true)
         every { config.requireDataAccessApproval } returns true

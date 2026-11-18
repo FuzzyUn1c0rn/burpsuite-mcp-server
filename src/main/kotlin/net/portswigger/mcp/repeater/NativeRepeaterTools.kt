@@ -37,12 +37,14 @@ internal fun Server.registerNativeRepeaterTools(api: MontoyaApi, config: McpConf
 
     if (investigationMode) {
     val probeJson = Json { encodeDefaults = true }
-    mcpTool<RepeaterM0Probe>("M0 INVESTIGATION ONLY. inspect/edit/model_read require M0_UNVERIFIED_NATIVE_MODEL acknowledgement. model_read_auto requires M0_AUTO_CONTEXT_READ and one exact synchronous public event/owned popup on the frozen Hex table, read-only. model_write_bytes requires M0_BYTE_MODEL_WRITE and manual context. model_write_bytes_auto requires M0_AUTO_BYTE_MODEL_WRITE: one guarded setter, then callback/dispatch exit, popup cleanup and deregistration, later EDT turn and a new read-only context for complete-byte/service/model-version confirmation. Writers require expected model hash/service/version and replacementRequestBase64. Shared automatic-write deadline30s; missing confirmation is possible mutation, never retry. Byte semantics are probe-only, not final editor_text. Exact tool/tab already selected. No Send, view/focus/settings change, rollback or retained facade. Synthetic disposable M0 project only.") {
-        require(action in setOf("inspect", "edit", "model_read", "model_read_auto", "model_write_bytes", "model_write_bytes_auto")) { "Unsupported M0 action" }
+    mcpTool<RepeaterM0Probe>("M0 INVESTIGATION ONLY. inspect/edit/model_read require M0_UNVERIFIED_NATIVE_MODEL acknowledgement. model_read_auto requires M0_AUTO_CONTEXT_READ and one exact synchronous public event/owned popup on the frozen Hex table, read-only. model_write_bytes requires M0_BYTE_MODEL_WRITE and manual context. model_write_bytes_auto requires M0_AUTO_BYTE_MODEL_WRITE: one guarded setter then a new read-only context after callback/dispatch exit, owned cleanup, deregistration and later EDT turn. Writers require expected hash/service/version/replacementRequestBase64, shared automatic-write deadline30s, uncertainty never retry. profile_menu_inspect requires M0_PROFILE_MENU_DISCOVERY: read an already manually opened gear menu, fixed semantic tokens/public state only, no open/select/close/reset or effective-profile claim. Byte semantics probe-only, not final editor_text. Exact tool/tab already selected. No Send, view/focus/settings change, rollback or retained facade. Synthetic disposable M0 project only.") {
+        require(action in setOf("inspect", "edit", "model_read", "model_read_auto", "model_write_bytes", "model_write_bytes_auto", "profile_menu_inspect")) { "Unsupported M0 action" }
+        val profileDiscovery = action == "profile_menu_inspect"
         val automaticWriting = action == "model_write_bytes_auto"
         val writing = action == "model_write_bytes" || automaticWriting
         val automaticRead = action == "model_read_auto"
-        require(acknowledgement == when { automaticWriting -> "M0_AUTO_BYTE_MODEL_WRITE";
+        require(acknowledgement == when { profileDiscovery -> "M0_PROFILE_MENU_DISCOVERY";
+            automaticWriting -> "M0_AUTO_BYTE_MODEL_WRITE";
             writing -> "M0_BYTE_MODEL_WRITE"; automaticRead -> "M0_AUTO_CONTEXT_READ";
             else -> "M0_UNVERIFIED_NATIVE_MODEL" }) { "Explicit M0 action acknowledgement required" }
         require((action == "edit") == (requestContent != null && expectedFingerprint != null)) {
@@ -55,7 +57,8 @@ internal fun Server.registerNativeRepeaterTools(api: MontoyaApi, config: McpConf
         val writePlan = if (writing) M0ByteWritePlan.parse(checkNotNull(expectedModelRequestSha256), checkNotNull(expectedTargetHostname),
             checkNotNull(expectedTargetPort), checkNotNull(expectedUsesHttps), checkNotNull(expectedModelHttpVersion),
             checkNotNull(replacementRequestBase64)) else null
-        checkReadPermission()
+        val profilePermission = if (profileDiscovery) approveM0ProfileMenuRead(config) else null
+        if (!profileDiscovery) checkReadPermission()
         val approvedRequire = config.requireDataAccessApproval
         val approvedAlways = config.alwaysAllowRepeater
         fun permissionStillValid() = !config.requireDataAccessApproval || config.alwaysAllowRepeater ||
@@ -65,6 +68,11 @@ internal fun Server.registerNativeRepeaterTools(api: MontoyaApi, config: McpConf
                 val snapshot = native.investigateEdit(tabId, checkNotNull(expectedFingerprint), checkNotNull(requestContent))
                 probeJson.encodeToString(RepeaterM0EditResult(snapshot.tabId, snapshot.fingerprint,
                     snapshot.targetHostname, snapshot.targetPort, snapshot.usesHttps))
+            } else if (profileDiscovery) {
+                val allowed = checkNotNull(profilePermission)
+                val observation = inspectM0ProfileMenu(native, tabId, allowed)
+                check(allowed()) { "Repeater data access changed during inspection." }
+                probeJson.encodeToString(observation)
             } else if (automaticWriting) {
                 probeJson.encodeToString(observeM0AutomaticWrite(api, native, tabId, checkNotNull(writePlan), ::permissionStillValid))
             } else if (action == "model_read" || automaticRead || writing) {
