@@ -389,6 +389,7 @@ internal data class M0ContextModelObservation(
     val observedInvocationType: String? = null,
     val mutationMayHaveOccurred: Boolean = false, val modelWriteConfirmed: Boolean = false,
     val configuredProtocolVerified: Boolean = false,
+    val configuredProtocol: String = "unverified",
     val byteInputContract: String = "M0 model bytes only; final editor_text semantics unassigned",
     val constructorDiagnostics: M0ConstructorObservation? = null,
     val mutationGuards: M0MutationGuards? = null,

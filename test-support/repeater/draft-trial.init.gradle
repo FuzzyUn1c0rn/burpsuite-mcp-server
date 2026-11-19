@@ -3,6 +3,13 @@
 gradle.projectsEvaluated {
     def project = gradle.rootProject
     def sets = project.sourceSets
+    def stdlibContents = {
+        def stdlib = project.configurations.testRuntimeClasspath.files.findAll {
+            it.name ==~ /kotlin-stdlib-[0-9].*\.jar/
+        }
+        if (stdlib.size() != 1) throw new GradleException('Expected exactly one Kotlin standard library')
+        project.zipTree(stdlib.iterator().next())
+    }
     project.tasks.register('m0DraftTrialJar', Jar) {
         dependsOn project.tasks.named('testClasses')
         archiveFileName = 'm0-draft-trial.jar'
@@ -20,14 +27,18 @@ gradle.projectsEvaluated {
             include 'net/portswigger/mcp/repeater/M0DraftTrialExtension*.class'
             include 'net/portswigger/mcp/repeater/DraftTrial*.class'
         }
-        from({
-            def stdlib = project.configurations.testRuntimeClasspath.files.findAll {
-                it.name ==~ /kotlin-stdlib-[0-9].*\.jar/
-            }
-            if (stdlib.size() != 1) throw new GradleException('Expected exactly one Kotlin standard library')
-            project.zipTree(stdlib.iterator().next())
-        }) {
-            include 'kotlin/**'
+        from(stdlibContents) { include 'kotlin/**' }
+    }
+    project.tasks.register('m0TypedDraftTrialJar', Jar) {
+        dependsOn project.tasks.named('testClasses')
+        archiveFileName = 'm0-typed-draft-trial.jar'
+        destinationDirectory = project.layout.buildDirectory.dir('m0-draft-trial')
+        preserveFileTimestamps = false
+        reproducibleFileOrder = true
+        manifest.attributes('Main-Class': 'net.portswigger.mcp.repeater.M0TypedDraftTrialExtension')
+        from(sets.test.output) {
+            include 'net/portswigger/mcp/repeater/M0TypedDraftTrialExtension*.class'
         }
+        from(stdlibContents) { include 'kotlin/**' }
     }
 }

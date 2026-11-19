@@ -90,6 +90,7 @@ class RepeaterM0ByteWriteTest {
         assertEquals(m0ByteHash(f.newBytes), observed.modelRequestSha256)
         assertEquals("850f7dc43910ff890f8879c0ed26fe697c93a067ad93a7d50f466a7028a9bf4e", observed.modelBodySha256)
         assertFalse(observed.configuredProtocolVerified)
+        assertEquals("unverified", observed.configuredProtocol)
         assertTrue(checkNotNull(observed.constructorDiagnostics).exactBytesEqual)
         val readback = checkNotNull(observed.readbackDiagnostics)
         assertEquals(m0ByteHash(f.newBytes), readback.requestSha256)
@@ -103,10 +104,11 @@ class RepeaterM0ByteWriteTest {
     }
 
     @Test fun `stale full bytes service or model version refuse before setter`() = runBlocking {
-        for (scenario in listOf("hash", "host", "port", "tls", "version", "owned", "busy", "native_service", "permission", "response", "viewer")) {
+        for (scenario in listOf("hash", "bytes", "host", "port", "tls", "version", "owned", "busy", "native_service", "permission", "response", "viewer")) {
             val f = Fixture()
             val plan = f.plan(if (scenario == "hash") "0".repeat(64) else m0ByteHash(f.oldBytes))
             when (scenario) {
+                "bytes" -> f.current = f.model(f.oldBytes.toString(Charsets.UTF_8).replace("/old", "/changed").toByteArray())
                 "host" -> every { f.old.httpService().host() } returns "other.test"
                 "port" -> every { f.old.httpService().port() } returns 8443
                 "tls" -> every { f.old.httpService().secure() } returns false

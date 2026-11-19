@@ -112,5 +112,6 @@ internal data class M0AutomaticWriteObservation(
     val laterEdtTurnPassed: Boolean, val writeStage: M0ContextModelObservation?,
     val freshReadStage: M0ContextModelObservation?,
     val configuredProtocolVerified: Boolean = false,
+    val configuredProtocol: String = "unverified",
     val confirmationBasis: String = "current bytes/service/model-version in a new exact generated context; not wire/configured mode/history"
 )
