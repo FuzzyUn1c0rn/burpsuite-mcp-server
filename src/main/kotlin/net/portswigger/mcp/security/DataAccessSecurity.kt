@@ -26,6 +26,8 @@ class SwingDataAccessApprovalHandler : DataAccessApprovalHandler {
             appendLine("An MCP client is requesting access to your Burp Suite $accessTypeName.")
             appendLine()
             appendLine("This may include sensitive data from previous web sessions.")
+            if (accessType == DataAccessType.REPEATER)
+                appendLine("Available Repeater draft tools may also duplicate or modify requests locally.")
             appendLine("Choose how you would like to respond:")
         }
 

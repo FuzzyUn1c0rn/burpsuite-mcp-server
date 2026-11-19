@@ -39,6 +39,23 @@ class NativeRepeaterTest {
     }
 
     @Test
+    fun `draft response samples only the owned response display`() = runBlocking {
+        val fixture = NullHexFixture().apply { prepare() }
+        val target = fixture.f.native.modelContextTarget(fixture.id, activate = true)
+        SwingUtilities.invokeAndWait {
+            val sample = checkNotNull(target.readDraftUi)
+            val response = JTextArea("HTTP/1.1 200 OK\r\n\r\n").apply { isEditable = false }
+            assertEquals("unavailable", sample(4000).response.availability)
+            fixture.responseRegion.add(response)
+            assertEquals("HTTP", sample(4).response.preview)
+            assertTrue(sample(4).response.truncated)
+            assertEquals("available", sample(0).response.availability)
+            response.text = ""
+            assertEquals("empty_or_not_rendered", sample(4000).response.availability)
+        }
+    }
+
+    @Test
     fun `null-page Hex binds only the pre-captured unique Request table without selecting views`() = runBlocking {
         val fixture = NullHexFixture().apply { prepare() }
         val target = fixture.f.native.modelContextTarget(fixture.id)

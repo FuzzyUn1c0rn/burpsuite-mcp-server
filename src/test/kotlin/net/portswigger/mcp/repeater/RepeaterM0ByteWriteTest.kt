@@ -275,7 +275,7 @@ class RepeaterM0ByteWriteTest {
         val native = mockk<NativeRepeater>()
         val registration = mockk<Registration>()
         val registered = CompletableDeferred<ContextMenuItemsProvider>()
-        coEvery { native.modelContextTarget("tab", any()) } returns f.target
+        coEvery { native.modelContextTarget("tab", any(), false) } returns f.target
         every { api.userInterface().registerContextMenuItemsProvider(any()) } answers {
             registered.complete(firstArg()); registration
         }
@@ -300,7 +300,7 @@ class RepeaterM0ByteWriteTest {
         val api = mockk<MontoyaApi>(relaxed = true)
         val native = mockk<NativeRepeater>()
         var provider: ContextMenuItemsProvider? = null
-        coEvery { native.modelContextTarget("tab", any()) } returns f.target
+        coEvery { native.modelContextTarget("tab", any(), false) } returns f.target
         every { api.userInterface().registerContextMenuItemsProvider(any()) } answers {
             provider = firstArg()
             SwingUtilities.invokeAndWait { checkNotNull(provider).provideMenuItems(f.event) }
@@ -340,7 +340,7 @@ class RepeaterM0ByteWriteTest {
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
         var provider: ContextMenuItemsProvider? = null
-        coEvery { native.modelContextTarget("tab", any()) } returns f.target
+        coEvery { native.modelContextTarget("tab", any(), false) } returns f.target
         every { api.userInterface().registerContextMenuItemsProvider(any()) } answers {
             provider = firstArg()
             entered.countDown()

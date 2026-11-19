@@ -15,6 +15,7 @@ import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
 import io.modelcontextprotocol.kotlin.sdk.server.mcp
 import io.modelcontextprotocol.kotlin.sdk.server.mcpStreamableHttp
 import net.portswigger.mcp.config.McpConfig
+import net.portswigger.mcp.repeater.RepeaterDraftService
 import net.portswigger.mcp.tools.registerTools
 import java.net.URI
 import java.util.concurrent.ExecutorService
@@ -25,7 +26,8 @@ const val STREAMABLE_HTTP_PATH = "/mcp"
 private const val MCP_SESSION_ID_HEADER = "Mcp-Session-Id"
 private const val MCP_PROTOCOL_VERSION_HEADER = "Mcp-Protocol-Version"
 
-class KtorServerManager(private val api: MontoyaApi) : ServerManager {
+class KtorServerManager internal constructor(private val api: MontoyaApi,
+    private val draftFactory: ((McpConfig) -> RepeaterDraftService)? = null) : ServerManager {
 
     private var server: EmbeddedServer<*, *>? = null
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -111,7 +113,8 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
                         mcpServer
                     }
 
-                    mcpServer.registerTools(api, config)
+                    val drafts = mcpServer.registerTools(api, config, draftFactory?.invoke(config))
+                    if (drafts != null) monitor.subscribe(ApplicationStopping) { drafts.close() }
                 }.apply {
                     start(wait = false)
                 }

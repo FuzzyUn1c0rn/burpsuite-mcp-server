@@ -2,6 +2,17 @@ package net.portswigger.mcp.repeater
 
 import burp.api.montoya.MontoyaApi
 import io.modelcontextprotocol.kotlin.sdk.server.Server
+import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
+import io.modelcontextprotocol.kotlin.sdk.types.TextContent
+import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
+import kotlinx.coroutines.CancellationException
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
+import net.portswigger.mcp.schema.asInputSchema
+import kotlin.reflect.KClass
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
@@ -11,13 +22,14 @@ import net.portswigger.mcp.security.DataAccessSecurity
 import net.portswigger.mcp.security.DataAccessType
 import net.portswigger.mcp.tools.mcpTool
 
-internal fun Server.registerNativeRepeaterTools(api: MontoyaApi, config: McpConfig) {
-    if (!java.lang.Boolean.getBoolean("net.portswigger.mcp.repeater.m0")) return
-    val native = NativeRepeater { api.userInterface().swingUtils().suiteFrame() }
-    val operations = Mutex()
+internal fun Server.registerNativeRepeaterTools(api: MontoyaApi, config: McpConfig,
+    draftService: RepeaterDraftService? = null): AutoCloseable? {
+    val investigation = java.lang.Boolean.getBoolean("net.portswigger.mcp.repeater.m0")
+    if (!investigation && !java.lang.Boolean.getBoolean("net.portswigger.mcp.repeater.drafts")) return null
+    val service = draftService ?: newRepeaterDraftService(api, config)
 
     val probeJson = Json { encodeDefaults = true }
-    mcpTool<RepeaterM0Probe>("M0 INVESTIGATION ONLY. inspect/edit/model_read require M0_UNVERIFIED_NATIVE_MODEL acknowledgement. model_read_auto requires M0_AUTO_CONTEXT_READ and one exact synchronous public event/owned popup on the frozen Hex table, read-only. model_write_bytes requires M0_BYTE_MODEL_WRITE and manual context. model_write_bytes_auto requires M0_AUTO_BYTE_MODEL_WRITE: one guarded setter then a new read-only context after callback/dispatch exit, owned cleanup, deregistration and later EDT turn. Writers require expected hash/service/version/replacementRequestBase64, shared automatic-write deadline30s, uncertainty never retry. profile_menu_inspect requires M0_PROFILE_MENU_DISCOVERY: read an already manually opened gear menu, fixed semantic tokens/public state only, no open/select/close/reset or effective-profile claim. Byte semantics probe-only, not final editor_text. Exact tool/tab already selected. No Send, view/focus/settings change, rollback or retained facade. Synthetic disposable M0 project only.") {
+    if (investigation) mcpTool<RepeaterM0Probe>("M0 INVESTIGATION ONLY. inspect/edit/model_read require M0_UNVERIFIED_NATIVE_MODEL acknowledgement. model_read_auto requires M0_AUTO_CONTEXT_READ and one exact synchronous public event/owned popup on the frozen Hex table, read-only. model_write_bytes requires M0_BYTE_MODEL_WRITE and manual context. model_write_bytes_auto requires M0_AUTO_BYTE_MODEL_WRITE: one guarded setter then a new read-only context after callback/dispatch exit, owned cleanup, deregistration and later EDT turn. Writers require expected hash/service/version/replacementRequestBase64, shared automatic-write deadline30s, uncertainty never retry. profile_menu_inspect requires M0_PROFILE_MENU_DISCOVERY: read an already manually opened gear menu, fixed semantic tokens/public state only, no open/select/close/reset or effective-profile claim. Byte semantics probe-only, not final editor_text. Exact tool/tab already selected. No Send, view/focus/settings change, rollback or retained facade. Synthetic disposable M0 project only.") {
         require(action in setOf("inspect", "edit", "model_read", "model_read_auto", "model_write_bytes", "model_write_bytes_auto", "profile_menu_inspect")) { "Unsupported M0 action" }
         val profileDiscovery = action == "profile_menu_inspect"
         val automaticWriting = action == "model_write_bytes_auto"
@@ -37,33 +49,74 @@ internal fun Server.registerNativeRepeaterTools(api: MontoyaApi, config: McpConf
         val writePlan = if (writing) M0ByteWritePlan.parse(checkNotNull(expectedModelRequestSha256), checkNotNull(expectedTargetHostname),
             checkNotNull(expectedTargetPort), checkNotNull(expectedUsesHttps), checkNotNull(expectedModelHttpVersion),
             checkNotNull(replacementRequestBase64)) else null
-        withM0RepeaterAccess(config, operations, mayMutate = action == "edit" || writing) { allowed ->
+        service.investigate(tabId, mayMutate = action == "edit" || writing) { native, nativeId, allowed ->
             if (action == "edit") {
-                val snapshot = native.investigateEdit(tabId, checkNotNull(expectedFingerprint),
+                val snapshot = native.investigateEdit(nativeId, checkNotNull(expectedFingerprint),
                     checkNotNull(requestContent), allowed)
-                probeJson.encodeToString(RepeaterM0EditResult(snapshot.tabId, snapshot.fingerprint,
+                probeJson.encodeToString(RepeaterM0EditResult(tabId, snapshot.fingerprint,
                     snapshot.targetHostname, snapshot.targetPort, snapshot.usesHttps))
             } else if (profileDiscovery) {
-                probeJson.encodeToString(inspectM0ProfileMenu(native, tabId, allowed))
+                probeJson.encodeToString(inspectM0ProfileMenu(native, nativeId, allowed))
             } else if (automaticWriting) {
-                probeJson.encodeToString(observeM0AutomaticWrite(api, native, tabId, checkNotNull(writePlan), allowed))
+                probeJson.encodeToString(observeM0AutomaticWrite(api, native, nativeId, checkNotNull(writePlan), allowed))
             } else if (action == "model_read" || automaticRead || writing) {
-                val observation = observeM0ContextModel(api, native, tabId, writePlan, allowed,
+                val observation = observeM0ContextModel(api, native, nativeId, writePlan, allowed,
                     automaticRead = automaticRead)
                 probeJson.encodeToString(observation)
             } else {
-                probeJson.encodeToString(RepeaterM0Inspection(native.investigateControls(tabId, allowed)))
+                probeJson.encodeToString(RepeaterM0Inspection(native.investigateControls(nativeId, allowed)))
             }
         }
     }
 
-    mcpTool<GetRepeaterTabs>("Experimental native Swing Repeater control. Lists native tab IDs and names, including collapsed groups' request tabs. kind=group identifies headers that are not request drafts. groupPath=null means membership is unavailable in Burp's flat group layout. Selects Repeater. IDs last until server restart or tab closure; duplicate names are allowed.") {
-        withM0RepeaterAccess(config, operations) { Json.encodeToString(native.tabs(it)) }
-    }
+    addDraftReadTool("get_repeater_tabs",
+        "List a page of native Repeater drafts and groups. May select the main Repeater tool.",
+        GetRepeaterTabs::class, GetRepeaterTabs.serializer(), DraftTabList.serializer(), service, { null }, service::list)
+    addDraftReadTool("get_repeater_tab",
+        "Read one native draft by ID. Select Hex in that draft for model-backed reads. A displayed response may belong to an earlier draft.",
+        GetRepeaterTab::class, GetRepeaterTab.serializer(), DraftTabRead.serializer(), service, { it.tabId }, service::read)
+    return service
+}
 
-    mcpTool<GetRepeaterTab>("Experimental: selects the exact native Repeater tab ID and reads its current request, displayed response, target and fingerprint. Use get_repeater_tabs first. Only HTTP tabs in Pretty/Raw views are supported.") {
-        withM0RepeaterAccess(config, operations) { Json.encodeToString(native.read(tabId, it)) }
+private val draftJson = Json { encodeDefaults = true }
+
+private fun <I : Any, O> Server.addDraftReadTool(name: String, description: String, input: KClass<I>,
+    serializer: KSerializer<I>, output: KSerializer<O>, service: RepeaterDraftService,
+    id: (I) -> String?, execute: suspend (I) -> O) {
+    val reflected = input.asInputSchema()
+    val properties = reflected.properties.orEmpty().mapValues { (key, value) ->
+        val options = when (key) {
+            "offset" -> mapOf("minimum" to JsonPrimitive(0), "default" to JsonPrimitive(0))
+            "count" -> mapOf("minimum" to JsonPrimitive(1), "maximum" to JsonPrimitive(DRAFT_MAX_PAGE),
+                "default" to JsonPrimitive(DRAFT_DEFAULT_PAGE))
+            "maxResponseLength" -> mapOf("minimum" to JsonPrimitive(0), "maximum" to JsonPrimitive(DRAFT_MAX_PREVIEW),
+                "default" to JsonPrimitive(DRAFT_DEFAULT_PREVIEW))
+            "includeRequest", "includeResponse" -> mapOf("default" to JsonPrimitive(true))
+            else -> emptyMap()
+        }
+        JsonObject(value.jsonObject + options)
     }
+    val schema = ToolSchema(properties = JsonObject(properties), required = reflected.required)
+    addTool(name = name, description = description, inputSchema = schema, handler = { request ->
+        var tabId: String? = null
+        fun error(code: String, message: String): CallToolResult = CallToolResult(
+            content = listOf(TextContent(draftJson.encodeToString(DraftError(code, message, service.instanceId, tabId)))),
+            isError = true
+        )
+        try {
+            val args = draftJson.decodeFromJsonElement(serializer, request.params.arguments ?: JsonObject(emptyMap()))
+            tabId = id(args)?.takeIf(draftTabIdPattern::matches)
+            CallToolResult(content = listOf(TextContent(draftJson.encodeToString(output, execute(args)))), isError = false)
+        } catch (canceled: CancellationException) {
+            throw canceled
+        } catch (failure: DraftFailure) {
+            error(failure.code, failure.message.orEmpty())
+        } catch (_: SerializationException) {
+            error("INVALID_ARGUMENT", "Check Repeater tool arguments and types.")
+        } catch (_: Exception) {
+            error("UNSUPPORTED_LAYOUT", "Cannot safely read the native Repeater state.")
+        }
+    })
 }
 
 /** Recheck a single approval after waiting for another draft operation and again before returning data. */
@@ -73,24 +126,22 @@ internal suspend fun <T> withM0RepeaterAccess(config: McpConfig, operations: Mut
     return operations.withLock {
         checkM0RepeaterAccess(allowed)
         val result = operation(allowed)
-        check(allowed()) {
+        if (!allowed()) throw DraftFailure("PERMISSION_DENIED",
             if (mayMutate) "Repeater data access changed; draft mutation may have occurred."
-            else "Repeater data access changed."
-        }
+            else "Repeater data access changed.")
         result
     }
 }
 
 internal fun checkM0RepeaterAccess(allowed: () -> Boolean) {
-    check(allowed()) { "Repeater data access changed." }
+    if (!allowed()) throw DraftFailure("PERMISSION_DENIED", "Repeater data access changed.")
 }
 
 internal suspend fun approveM0RepeaterAccess(config: McpConfig): () -> Boolean {
     fun policy() = config.requireDataAccessApproval to config.alwaysAllowRepeater
     val before = policy()
-    check(DataAccessSecurity.checkDataAccessPermission(DataAccessType.REPEATER, config)) {
-        "Repeater data access denied by Burp Suite."
-    }
+    if (!DataAccessSecurity.checkDataAccessPermission(DataAccessType.REPEATER, config))
+        throw DraftFailure("PERMISSION_DENIED", "Repeater data access denied by Burp Suite.")
     val approved = policy()
     // Allow Once leaves both flags unchanged. Always Allow may grant persistent access during the prompt.
     val granted = approved == before || before == (true to false) && approved == (true to true)
@@ -98,10 +149,11 @@ internal suspend fun approveM0RepeaterAccess(config: McpConfig): () -> Boolean {
 }
 
 @Serializable
-internal class GetRepeaterTabs
+internal data class GetRepeaterTabs(val offset: Int? = null, val count: Int? = null)
 
 @Serializable
-internal data class GetRepeaterTab(val tabId: String)
+internal data class GetRepeaterTab(val tabId: String, val includeRequest: Boolean? = null,
+    val includeResponse: Boolean? = null, val maxResponseLength: Int? = null)
 
 @Serializable
 internal data class RepeaterM0Probe(

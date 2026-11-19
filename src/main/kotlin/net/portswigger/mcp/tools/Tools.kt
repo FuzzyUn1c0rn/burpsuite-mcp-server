@@ -16,6 +16,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import net.portswigger.mcp.config.McpConfig
 import net.portswigger.mcp.repeater.registerNativeRepeaterTools
+import net.portswigger.mcp.repeater.RepeaterDraftService
 import net.portswigger.mcp.schema.encodeHistoryItem
 import net.portswigger.mcp.schema.toSerializableForm
 import net.portswigger.mcp.security.DataAccessSecurity
@@ -110,8 +111,9 @@ private fun normalizePrelude(prelude: String): String = prelude
     .replace("\r", "")          // Actual CR → remove
     .replace("\n", "\r\n")      // All LF → proper CRLF
 
-fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
-    registerNativeRepeaterTools(api, config)
+internal fun Server.registerTools(api: MontoyaApi, config: McpConfig,
+    draftService: RepeaterDraftService? = null): AutoCloseable? {
+    val drafts = registerNativeRepeaterTools(api, config, draftService)
 
     mcpTool<SendHttp1Request>("Issues an HTTP/1.1 request and returns the response.") {
         val allowed = HttpRequestSecurity.checkHttpRequestPermission(targetHostname, targetPort, config, content, api)
@@ -390,6 +392,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
 
         "Editor text has been set"
     }
+    return drafts
 }
 
 fun getActiveEditor(api: MontoyaApi): JTextArea? {

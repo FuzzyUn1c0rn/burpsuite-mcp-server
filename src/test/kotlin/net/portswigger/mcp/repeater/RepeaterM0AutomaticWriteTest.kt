@@ -97,7 +97,7 @@ class RepeaterM0AutomaticWriteTest {
         }, { log += "clear$dispatches"; menu = emptyArray() })
 
         init {
-            coEvery { native.modelContextTarget("tab", any()) } returns target
+            coEvery { native.modelContextTarget("tab", any(), false) } returns target
             every { api.userInterface().registerContextMenuItemsProvider(any()) } answers {
                 val phase = ++registrations
                 log += "register$phase"
@@ -163,7 +163,7 @@ class RepeaterM0AutomaticWriteTest {
             assertTrue(f.log.indexOf("dispatch1-exit") < f.log.indexOf("hide1"))
             assertTrue(f.log.indexOf("clear1") < f.log.indexOf("deregister1"))
             assertTrue(f.log.indexOf("deregister1") < f.log.indexOf("register2"))
-            coVerify(exactly = 1) { f.native.modelContextTarget("tab", any()) }
+            coVerify(exactly = 1) { f.native.modelContextTarget("tab", any(), false) }
             val json = Json.encodeToString(result)
             assertFalse(json.contains("PRIVATE_PATH") || json.contains("X-Variant") || json.contains("café"))
         }

@@ -178,7 +178,7 @@ class RepeaterM0ContextProbeTest {
         val native = mockk<NativeRepeater>()
         val registration = mockk<Registration>(relaxed = true)
         val registered = CompletableDeferred<ContextMenuItemsProvider>()
-        coEvery { native.modelContextTarget("tab", any()) } returns f.target
+        coEvery { native.modelContextTarget("tab", any(), false) } returns f.target
         every { api.userInterface().registerContextMenuItemsProvider(any()) } answers {
             registered.complete(firstArg())
             registration

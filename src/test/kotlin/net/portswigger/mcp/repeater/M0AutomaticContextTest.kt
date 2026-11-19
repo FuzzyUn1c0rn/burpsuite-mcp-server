@@ -180,7 +180,7 @@ class M0AutomaticContextTest {
         lateinit var provider: ContextMenuItemsProvider
         val bytes = "GET /PRIVATE_PATH HTTP/2\r\nHost: private.test\r\n\r\n".toByteArray()
         init {
-            coEvery { native.modelContextTarget("tab", any()) } returns target
+            coEvery { native.modelContextTarget("tab", any(), false) } returns target
             every { api.userInterface().registerContextMenuItemsProvider(any()) } answers { provider = firstArg(); registration }
             every { event.isFromTool(ToolType.REPEATER) } returns true
             every { event.invocationType() } returns InvocationType.MESSAGE_EDITOR_REQUEST

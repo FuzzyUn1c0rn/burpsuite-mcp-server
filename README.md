@@ -144,18 +144,29 @@ it without the plugin.
 By default the extension asks for approval in Burp before sending HTTP requests or reading proxy history, so keep an
 eye on Burp while Codex works, or use the auto-approve options in the `MCP` tab.
 
-## Native Repeater drafts (M0 investigation)
+## Native Repeater drafts
 
-In the opt-in M0 build, `get_repeater_tabs` lists native request and group identities. Duplicate names
-are valid. `get_repeater_tab` selects a request by ID and returns its current
-editor text, target, fingerprint and any displayed response. A displayed
-response may belong to an earlier draft. Listing selects the Repeater tool,
-and reads leave the requested tab selected. Repeater reads require the
-extension's Repeater data permission.
+Enable native draft listing and reads by starting Burp with the JVM property
+`-Dnet.portswigger.mcp.repeater.drafts=true`. The initial adapter targets
+Burp Community 2026.11.2 on Windows with main-window Repeater tabs.
+List the drafts with `get_repeater_tabs` and read one by its returned ID
+with `get_repeater_tab`. Duplicate names are allowed. Listing can select
+the Repeater tool. Reading selects the requested draft and leaves it
+selected. Select the draft's **Hex** request view for an authoritative
+model-backed read. Other views may be refused.
+
+The read reports the native model's HTTP version, destination and whole-draft
+fingerprint. Configured protocol is unverified. Set `includeRequest: false`
+to omit the request document while keeping its fingerprint. The bounded
+response preview, when available, represents the currently displayed UI and
+may belong to an earlier draft. Set `includeResponse: false` or
+`maxResponseLength: 0` to omit preview text. Repeater data permission still
+applies. IDs remain valid across reconnects to the same service and expire
+after a project or service change.
 
 `create_repeater_tab` and `create_repeater_tab_http2` open drafts using the
-existing creation contract. Draft confirmation, cloning and model-backed
-editing are under investigation. Use only the
+existing creation contract. Draft confirmation, cloning and editing are
+outside the current candidate. Use only the
 [isolated M0 runbook](test-support/repeater/M0.md) for the temporary probe.
 The candidate contains no Repeater Send or send-status tool.
 

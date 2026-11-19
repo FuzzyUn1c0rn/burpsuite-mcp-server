@@ -28,11 +28,19 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
     private var listedOwner: WeakRepeaterOwner? = null
 
     /** Read-only M0 context experiment: never switches Pretty/Raw/Hex. */
-    suspend fun modelContextTarget(tabId: String, allowed: () -> Boolean = { true }): M0ContextTarget = withContext(Dispatchers.Swing) {
+    suspend fun modelContextTarget(tabId: String, allowed: () -> Boolean = { true },
+        activate: Boolean = false): M0ContextTarget = withContext(Dispatchers.Swing) {
         checkM0RepeaterAccess(allowed)
         // This investigation requires the target already selected. Do not materialize
         // a different tab/view before capturing its editor-owner identities.
-        val selected = select(tabId, activate = false)
+        if (activate) {
+            val path = paths[tabId] ?: throw DraftFailure("TAB_NOT_FOUND", "List Repeater tabs again.")
+            if (path.last().content == null) throw DraftFailure("GROUP_NOT_REQUEST", "Choose a request tab.")
+        }
+        val selected = try { select(tabId, activate) } catch (failure: Exception) {
+            if (!activate) throw failure
+            throw DraftFailure("TAB_NOT_FOUND", "The identified Repeater tab is no longer available.")
+        }
         checkM0RepeaterAccess(allowed)
         val labels = components(selected.content).filterIsInstance<JLabel>()
             .filter { it.text == "Request" }.toList()
@@ -100,7 +108,25 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         fun tableValid() = requestRegion != null && hexTable != null && regionValid() &&
             visibleTables(requestRegion).singleOrNull() === hexTable
         val actionBar = M0ActionBar.capture(selected.content, requestOwner, responseOwner)
-        M0ContextTarget(tabId, viewName, automaticSource = hexTable, captureProfileMenuInvoker = { invoker ->
+        M0ContextTarget(tabId, viewName, automaticSource = hexTable, readDraftUi = { limit ->
+            check(SwingUtilities.isEventDispatchThread())
+            checkM0RepeaterAccess(allowed)
+            verifySelection(selected.owner, selected.identity)
+            if (!boundaryValid() || views.selectedIndex != viewIndex || views.getComponentAt(viewIndex) !== view ||
+                views.getTitleAt(viewIndex) != viewName || (hexTable != null && !tableValid())) {
+                throw DraftFailure("UNSUPPORTED_LAYOUT", "The owned request editor changed during the read.")
+            }
+            val target = visibleTarget(selected)
+            val cancel = components(selected.content).filterIsInstance<AbstractButton>()
+                .filter { visibleWithin(it, selected.content) && it.text == "Cancel" }.singleOrNull()
+            val response = components(responseOwner).filterIsInstance<JTextArea>()
+                .filter { visibleWithin(it, responseOwner) && !it.isEditable }.singleOrNull()
+            val display = displayedDraftResponse(response?.document, limit)
+            verifySelection(selected.owner, selected.identity)
+            DraftUiState(selected.description, target.host, target.port.takeIf { it >= 0 }
+                ?: if (target.scheme == "https") 443 else 80, target.scheme == "https",
+                when (cancel?.isEnabled) { true -> "busy"; false -> "idle"; null -> "unverified" }, display)
+        }, captureProfileMenuInvoker = { invoker ->
             check(SwingUtilities.isEventDispatchThread())
             val tabValid = try { verifySelection(selected.owner, selected.identity); true } catch (_: Exception) { false }
             val withinTab = invoker === selected.content || SwingUtilities.isDescendingFrom(invoker, selected.content)
@@ -436,7 +462,8 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
                     val id = previous?.key ?: UUID.randomUUID().toString()
                     result += Entry(RepeaterTab(id, nextNames.last(),
                         if (flatGroups) null else nextNames.dropLast(1),
-                        if (child == null) "group" else "request"), nextPath)
+                        if (child == null) "group" else "request",
+                        unsupportedReason = if (child == null) "GROUP_NOT_REQUEST" else null), nextPath)
                 }
             }
         }
@@ -508,8 +535,7 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
             identity.last().content, owner, identity)
     }
 
-    private fun snapshot(selected: Selected): RepeaterSnapshot {
-        verifySelection(selected.owner, selected.identity)
+    private fun visibleTarget(selected: Selected): URI {
         val labels = components(selected.content).filterIsInstance<JLabel>()
             .filter { visibleWithin(it, selected.content) && it.text?.startsWith("Target: ") == true }.toList()
         require(labels.size == 1) { "Cannot uniquely read the HTTP target for this Repeater tab." }
@@ -517,6 +543,12 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         require(target.scheme in setOf("http", "https") && !target.host.isNullOrEmpty() && target.userInfo == null) {
             "Unsupported Repeater target. Only HTTP and HTTPS tabs are supported."
         }
+        return target
+    }
+
+    private fun snapshot(selected: Selected): RepeaterSnapshot {
+        verifySelection(selected.owner, selected.identity)
+        val target = visibleTarget(selected)
         val editors = components(selected.content).filterIsInstance<JTextArea>()
             .filter { visibleWithin(it, selected.content) }.toList()
         val requests = editors.filter { REQUEST_LINE.containsMatchIn(it.text) }
@@ -580,7 +612,8 @@ internal fun requestFingerprint(host: String, port: Int, secure: Boolean, reques
     ).joinToString("") { "%02x".format(it) }
 
 @Serializable
-internal data class RepeaterTab(val tabId: String, val name: String, val groupPath: List<String>?, val kind: String)
+internal data class RepeaterTab(val tabId: String, val name: String, val groupPath: List<String>?, val kind: String,
+    val unsupportedReason: String? = null)
 
 @Serializable
 internal data class RepeaterSnapshot(

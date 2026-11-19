@@ -33,6 +33,7 @@ internal class M0ContextTarget(
     val matchesNativeService: (String, Int, Boolean) -> Boolean = { _, _, _ -> true },
     val automaticSource: JTable? = null,
     val captureProfileMenuInvoker: ((Component) -> M0ProfileMenuInvokerLease)? = null,
+    val readDraftUi: ((Int?) -> DraftUiState)? = null,
     val ownsSource: (Component) -> Boolean
 )
 
@@ -45,15 +46,18 @@ internal class RepeaterM0ContextProbe(
     private val automaticContext: M0AutomaticContext? = null,
     private val attempt: M0MutationAttempt = M0MutationAttempt(),
     private val allowAutomaticWrite: Boolean = false,
-    readbackExpectation: M0ReadbackExpectation? = null
+    readbackExpectation: M0ReadbackExpectation? = null,
+    receiveRequestBytes: ((ByteArray) -> Unit)? = null
 ) : ContextMenuItemsProvider {
     init {
         require(automaticContext == null || writePlan == null || allowAutomaticWrite) { "M0_AUTOMATIC_CONTEXT_IS_READ_ONLY" }
         require(readbackExpectation == null || writePlan == null) { "M0_FRESH_READ_PHASE_CANNOT_WRITE" }
+        require(receiveRequestBytes == null || writePlan == null) { "DRAFT_REQUEST_CAPTURE_IS_READ_ONLY" }
     }
     @Volatile private var target: M0ContextTarget? = target
     @Volatile private var writePlan: M0ByteWritePlan? = writePlan
     @Volatile private var readbackExpectation: M0ReadbackExpectation? = readbackExpectation
+    @Volatile private var receiveRequestBytes: ((ByteArray) -> Unit)? = receiveRequestBytes
     private val callbackDepth = AtomicInteger()
     val callbackExited get() = callbackDepth.get() == 0
     val result = CompletableDeferred<M0ContextModelObservation>()
@@ -199,7 +203,10 @@ internal class RepeaterM0ContextProbe(
                 return emptyList()
             }
             if (!current.ownsSource(source)) reject("IDENTITY_CHANGED_DURING_MODEL_READ")
-            else if (target === current) result.complete(observation)
+            else if (target === current) {
+                receiveRequestBytes?.invoke(snapshot.bytes)
+                result.complete(observation)
+            }
         } catch (failure: M0ModelFailure) {
             reject(failure.reason)
         } catch (_: Exception) {
@@ -213,6 +220,7 @@ internal class RepeaterM0ContextProbe(
         target = null
         writePlan = null
         readbackExpectation = null
+        receiveRequestBytes = null
         if (!result.isCompleted) result.cancel()
     }
 
@@ -265,14 +273,15 @@ private fun copyM0RequestModel(request: HttpRequest, closed: () -> Boolean): M0M
     if (closed()) return null
     val bodyLength = body.length()
     if (closed()) return null
-    if (messageLength !in 0..262_144 || bodyLength !in 0..262_144) throw M0ModelFailure("MODEL_REQUEST_TOO_LARGE")
+    if (messageLength !in 0..DRAFT_REQUEST_LIMIT || bodyLength !in 0..DRAFT_REQUEST_LIMIT)
+        throw M0ModelFailure("MODEL_REQUEST_TOO_LARGE")
     if (closed()) return null
     val bytes = message.bytes
     if (closed()) return null
     val bodyBytes = body.bytes
     if (closed()) return null
     val offset = request.bodyOffset()
-    if (bytes.size > 262_144 || bodyBytes.size > 262_144 || offset !in 0..bytes.size ||
+    if (bytes.size != messageLength || bodyBytes.size != bodyLength || offset !in 0..bytes.size ||
         !bytes.copyOfRange(offset, bytes.size).contentEquals(bodyBytes)) throw M0ModelFailure("MODEL_BYTES_INCONSISTENT")
     if (closed()) return null
     val service = request.httpService()
@@ -309,7 +318,8 @@ internal suspend fun observeM0ContextOnTarget(api: MontoyaApi, target: M0Context
     constructRequest: (HttpService, ByteArray) -> HttpRequest = ::constructM0ByteRequest,
     automaticInvocation: Boolean = false, automaticUi: M0AutomaticContextUi = M0AutomaticContextUi(),
     deadlineMillis: Long = 30_000, attempt: M0MutationAttempt = M0MutationAttempt(),
-    allowAutomaticWrite: Boolean = false, readbackExpectation: M0ReadbackExpectation? = null): M0ContextModelObservation {
+    allowAutomaticWrite: Boolean = false, readbackExpectation: M0ReadbackExpectation? = null,
+    receiveRequestBytes: ((ByteArray) -> Unit)? = null): M0ContextModelObservation {
     val tabId = target.tabId
     require(writePlan == null || target.view == "Hex") { "M0_BYTE_WRITER_REQUIRES_HEX" }
     require(!automaticInvocation || target.view == "Hex" && target.automaticSource != null) { "M0_AUTOMATIC_CONTEXT_REQUIRES_HEX" }
@@ -317,7 +327,8 @@ internal suspend fun observeM0ContextOnTarget(api: MontoyaApi, target: M0Context
         target.ownsSource, permissionStillValid, automaticUi) else null
     val probe = RepeaterM0ContextProbe(target, writePlan = writePlan, permissionStillValid = permissionStillValid,
         constructRequest = constructRequest, automaticContext = automatic, attempt = attempt,
-        allowAutomaticWrite = allowAutomaticWrite, readbackExpectation = readbackExpectation)
+        allowAutomaticWrite = allowAutomaticWrite, readbackExpectation = readbackExpectation,
+        receiveRequestBytes = receiveRequestBytes)
     var cleanupFailed = false
     val observation = try {
         withTimeoutOrNull(deadlineMillis) {
