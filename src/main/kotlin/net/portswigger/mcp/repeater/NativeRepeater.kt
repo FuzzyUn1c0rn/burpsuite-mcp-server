@@ -11,7 +11,6 @@ import java.net.URI
 import java.lang.ref.WeakReference
 import java.security.MessageDigest
 import java.util.UUID
-import java.util.WeakHashMap
 import java.util.Locale
 import javax.accessibility.AccessibleState
 import javax.swing.AbstractButton
@@ -23,14 +22,16 @@ import javax.swing.SwingUtilities
 
 /** Experimental adapter: only public Swing types, no reflection into Burp's obfuscated classes. */
 internal class NativeRepeater(private val suiteFrame: () -> Component) {
-    private val ids = WeakHashMap<Component, String>() // Accessed only on the event dispatch thread.
+    // Accessed only on the event dispatch thread.
     private val paths = mutableMapOf<String, List<WeakStep>>()
 
     /** Read-only M0 context experiment: never switches Pretty/Raw/Hex. */
-    suspend fun modelContextTarget(tabId: String): M0ContextTarget = withContext(Dispatchers.Swing) {
+    suspend fun modelContextTarget(tabId: String, allowed: () -> Boolean = { true }): M0ContextTarget = withContext(Dispatchers.Swing) {
+        checkM0RepeaterAccess(allowed)
         // This investigation requires the target already selected. Do not materialize
         // a different tab/view before capturing its editor-owner identities.
         val selected = select(tabId, activate = false)
+        checkM0RepeaterAccess(allowed)
         val labels = components(selected.content).filterIsInstance<JLabel>()
             .filter { it.text == "Request" }.toList()
         val responseLabels = components(selected.content).filterIsInstance<JLabel>()
@@ -204,11 +205,14 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
     }
 
     /** M0 investigation only: widget mutation is NOT yet a proven native-model edit. */
-    suspend fun investigateEdit(tabId: String, expectedFingerprint: String, request: String): RepeaterSnapshot =
+    suspend fun investigateEdit(tabId: String, expectedFingerprint: String, request: String,
+        allowed: () -> Boolean = { true }): RepeaterSnapshot =
         withContext(Dispatchers.Swing) {
+            checkM0RepeaterAccess(allowed)
             require(request.toByteArray(Charsets.UTF_8).size <= 256 * 1024) { "REQUEST_TOO_LARGE" }
             require(REQUEST_LINE.containsMatchIn(request)) { "Unsupported request document" }
             val selected = select(tabId)
+            checkM0RepeaterAccess(allowed)
             val before = snapshot(selected)
             require(before.fingerprint == expectedFingerprint) { "STALE_FINGERPRINT" }
             val cancel = components(selected.content).filterIsInstance<AbstractButton>()
@@ -221,7 +225,9 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
             val newProtocol = request.lineSequence().first().substringAfterLast(" ").trim()
             require(oldProtocol == newProtocol) { "Request-line protocol changes are outside this probe" }
             verifySelection(selected.identity)
+            checkM0RepeaterAccess(allowed)
             editors.single().text = request
+            check(allowed()) { "Repeater data access changed; draft mutation may have occurred." }
             val after = snapshot(selected)
             check(before.targetHostname == after.targetHostname && before.targetPort == after.targetPort &&
                 before.usesHttps == after.usesHttps) { "UPDATE_UNCONFIRMED: destination changed; mutation may have occurred" }
@@ -229,8 +235,10 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         }
 
     /** Bounded read-only control metadata, excluding editor contents and arbitrary accessible names. */
-    suspend fun investigateControls(tabId: String): List<RepeaterControlProbe> = withContext(Dispatchers.Swing) {
+    suspend fun investigateControls(tabId: String, allowed: () -> Boolean = { true }): List<RepeaterControlProbe> = withContext(Dispatchers.Swing) {
+        checkM0RepeaterAccess(allowed)
         val selected = select(tabId)
+        checkM0RepeaterAccess(allowed)
         components(selected.content).mapNotNull { component ->
             val text = when (component) {
                 is AbstractButton -> component.text
@@ -257,11 +265,14 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         }.take(200).toList()
     }
 
-    suspend fun tabs(): List<RepeaterTab> = withContext(Dispatchers.Swing) {
-        val entries = inventory()
+    suspend fun tabs(allowed: () -> Boolean = { true }): List<RepeaterTab> = withContext(Dispatchers.Swing) {
+        checkM0RepeaterAccess(allowed)
+        val entries = inventory(allowed)
         paths.clear()
         entries.forEach { entry ->
-            paths[entry.description.tabId] = entry.path.map { WeakStep(WeakReference(it.pane), WeakReference(it.header)) }
+            paths[entry.description.tabId] = entry.path.map {
+                WeakStep(WeakReference(it.pane), WeakReference(it.header), it.content?.let { page -> WeakReference(page) })
+            }
         }
         entries.map { it.description }
     }
@@ -298,19 +309,30 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
     private val draftCaptureSource = Any()
     private var draftCaptureSequence = 0L // Accessed on EDT only.
 
-    suspend fun read(tabId: String): RepeaterSnapshot {
-        var current = withContext(Dispatchers.Swing) { snapshot(select(tabId)) }
+    suspend fun read(tabId: String, allowed: () -> Boolean = { true }): RepeaterSnapshot {
+        suspend fun sample() = withContext(Dispatchers.Swing) {
+            checkM0RepeaterAccess(allowed)
+            val selected = select(tabId)
+            checkM0RepeaterAccess(allowed)
+            snapshot(selected)
+        }
+        var current = sample()
         // Burp populates a selected tab's response editor asynchronously. Yield without blocking Swing.
         repeat(8) {
             if (current.response != null) return current
             delay(25)
-            current = withContext(Dispatchers.Swing) { snapshot(select(tabId)) }
+            current = sample()
         }
         return current
     }
 
-    private data class Step(val pane: JTabbedPane, val header: Component)
-    private data class WeakStep(val pane: WeakReference<JTabbedPane>, val header: WeakReference<Component>)
+    private data class Step(val pane: JTabbedPane, val header: Component, val content: Component?)
+    private data class WeakStep(
+        val pane: WeakReference<JTabbedPane>, val header: WeakReference<Component>, val content: WeakReference<Component>?
+    ) {
+        fun matches(step: Step): Boolean = pane.get() === step.pane && header.get() === step.header &&
+            if (step.content == null) content == null else content?.get() === step.content
+    }
     private data class Entry(val description: RepeaterTab, val path: List<Step>)
     private data class SelectionIdentity(val pane: JTabbedPane, val header: Component, val content: Component)
     private data class Selected(val description: RepeaterTab, val content: Component, val identity: List<SelectionIdentity>)
@@ -343,9 +365,10 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         return roots.single()
     }
 
-    private fun inventory(): List<Entry> {
+    private fun inventory(allowed: () -> Boolean): List<Entry> {
         val (suiteTabs, repeaterIndex) = locateRepeater(suiteFrame())
         suiteTabs.selectedIndex = repeaterIndex
+        checkM0RepeaterAccess(allowed)
         return inventory(suiteTabs.getComponentAt(repeaterIndex))
     }
 
@@ -354,21 +377,25 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         if (panes.isEmpty()) return emptyList()
         require(panes.size == 1) { "Unsupported Repeater tab layout." }
         val result = mutableListOf<Entry>()
+        val previousByHeader = paths.entries.associateBy { it.value.last().header.get() }
         fun collect(pane: JTabbedPane, path: List<Step>, names: List<String>) {
             val flatGroups = (0 until pane.tabCount).any { pane.getComponentAt(it) == null }
             for (index in 0 until pane.tabCount) {
                 val header = pane.getTabComponentAt(index)
                     ?: error("Unsupported Repeater tab header. No tab index fallback is allowed.")
-                val nextPath = path + Step(pane, header)
-                val nextNames = names + pane.getTitleAt(index)
                 val child = pane.getComponentAt(index)
+                val nextPath = path + Step(pane, header, child)
+                val nextNames = names + pane.getTitleAt(index)
                 val nested = child?.let { components(it).filterIsInstance<JTabbedPane>()
                     .filter { nestedPane -> nestedPane.javaClass == pane.javaClass }.toList() }.orEmpty()
                 if (nested.isNotEmpty()) {
                     require(nested.size == 1) { "Unsupported nested Repeater group layout." }
                     collect(nested.single(), nextPath, nextNames)
                 } else {
-                    val id = ids.getOrPut(header) { UUID.randomUUID().toString() }
+                    val previous = previousByHeader[header]?.takeIf { (_, known) ->
+                        known.size == nextPath.size && known.indices.all { known[it].matches(nextPath[it]) }
+                    }
+                    val id = previous?.key ?: UUID.randomUUID().toString()
                     result += Entry(RepeaterTab(id, nextNames.last(),
                         if (flatGroups) null else nextNames.dropLast(1),
                         if (child == null) "group" else "request"), nextPath)
@@ -398,9 +425,13 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
             val index = (0 until pane.tabCount).singleOrNull {
                 pane.getTabComponentAt(it) === header
             } ?: error("Repeater tab changed while selecting it.")
-            val expectedContent = pane.getComponentAt(index)
-            require(expectedContent != null) {
+            require(step.content != null) {
                 "This ID identifies a group header. List tabs and choose an ID with kind=request."
+            }
+            val expectedContent = step.content.get()
+            if (expectedContent == null || pane.getComponentAt(index) !== expectedContent) {
+                paths.remove(tabId)
+                error("Repeater tab content was replaced or closed. List tabs again.")
             }
             SelectionIdentity(pane, header, expectedContent)
         }

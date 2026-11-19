@@ -325,11 +325,11 @@ class RepeaterM0ProfileMenuTest {
 
     @Test fun `native capture failure is sanitized and cancellation propagates`() = runBlocking {
         val native = mockk<NativeRepeater>()
-        coEvery { native.modelContextTarget("tab") } throws IllegalStateException("PRIVATE_NATIVE_EXCEPTION")
+        coEvery { native.modelContextTarget("tab", any()) } throws IllegalStateException("PRIVATE_NATIVE_EXCEPTION")
         val result = inspectM0ProfileMenu(native, "tab")
         assertEquals("NATIVE_TARGET_CAPTURE_UNCONFIRMED", result.reason)
         assertFalse(Json.encodeToString(result).contains("PRIVATE_"))
-        coEvery { native.modelContextTarget("tab") } throws CancellationException()
+        coEvery { native.modelContextTarget("tab", any()) } throws CancellationException()
         val failure = runCatching { inspectM0ProfileMenu(native, "tab") }.exceptionOrNull()
         assertTrue(failure is CancellationException)
     }

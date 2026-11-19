@@ -470,6 +470,50 @@ class NativeRepeaterTest {
     }
 
     @Test
+    fun `a retained header cannot transfer an old tab ID to identical replacement content`() = runBlocking {
+        for (relistBeforeEdit in listOf(false, true)) {
+            val f = Fixture()
+            val original = f.add("same")
+            val before = f.native.read(f.native.tabs().single().tabId)
+            lateinit var replacement: JTextArea
+            SwingUtilities.invokeAndWait {
+                val header = f.tabs.getTabComponentAt(0)
+                replacement = f.add("replacement")
+                val page = f.tabs.getComponentAt(1)
+                f.tabs.removeTabAt(1)
+                f.tabs.setComponentAt(0, page)
+                assertSame(header, f.tabs.getTabComponentAt(0))
+                assertEquals(original.text, replacement.text)
+            }
+            if (relistBeforeEdit) assertNotEquals(before.tabId, f.native.tabs().single().tabId)
+            assertThrows(IllegalStateException::class.java) {
+                runBlocking {
+                    f.native.investigateEdit(before.tabId, before.fingerprint, before.request.replace("/one", "/changed"))
+                }
+            }
+            val relisted = f.native.tabs().single().tabId
+            assertNotEquals(before.tabId, relisted)
+            assertEquals(before.fingerprint, f.native.read(relisted).fingerprint)
+            assertEquals(before.request, replacement.text)
+        }
+    }
+
+    @Test
+    fun `revocation from a tab selection listener prevents a native read`() = runBlocking {
+        val f = Fixture()
+        f.add("other")
+        f.add("target")
+        val target = f.native.tabs().last()
+        var permitted = true
+        SwingUtilities.invokeAndWait {
+            f.tabs.selectedIndex = 0
+            f.tabs.addChangeListener { permitted = false }
+        }
+        val failure = runCatching { f.native.read(target.tabId) { permitted } }.exceptionOrNull()
+        assertEquals("Repeater data access changed.", failure?.message)
+    }
+
+    @Test
     fun `closed tab is rejected even if same name is recreated`() = runBlocking {
         val f = Fixture()
         f.add("same")

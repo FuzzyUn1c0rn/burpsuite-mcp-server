@@ -1,7 +1,10 @@
 package net.portswigger.mcp.repeater
 
 import io.mockk.*
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
 import net.portswigger.mcp.config.McpConfig
 import net.portswigger.mcp.security.DataAccessApprovalHandler
 import net.portswigger.mcp.security.DataAccessSecurity
@@ -28,7 +31,7 @@ class RepeaterPermissionTest {
         val approval = mockk<DataAccessApprovalHandler>()
         coEvery { approval.requestDataAccess(DataAccessType.REPEATER, config) } returns true
         DataAccessSecurity.approvalHandler = approval
-        val permitted = approveM0ProfileMenuRead(config)
+        val permitted = approveM0RepeaterAccess(config)
         assertTrue(permitted())
         assertTrue(permitted())
         always = true
@@ -44,11 +47,61 @@ class RepeaterPermissionTest {
         every { config.alwaysAllowRepeater } answers { always }
         val approval = mockk<DataAccessApprovalHandler>()
         DataAccessSecurity.approvalHandler = approval
-        val permitted = approveM0ProfileMenuRead(config)
+        val permitted = approveM0RepeaterAccess(config)
         assertTrue(permitted())
         always = false
         assertFalse(permitted())
         coVerify(exactly = 0) { approval.requestDataAccess(any(), any()) }
+    }
+
+    @Test
+    fun `queued Repeater operation stops on revocation without reopening a prompt`() = runBlocking {
+        val config = mockk<McpConfig>()
+        var always = true
+        every { config.requireDataAccessApproval } returns true
+        every { config.alwaysAllowRepeater } answers { always }
+        val approval = mockk<DataAccessApprovalHandler>()
+        DataAccessSecurity.approvalHandler = approval
+        val queue = Mutex(locked = true)
+        val queued = async(start = CoroutineStart.UNDISPATCHED) {
+            runCatching {
+                withM0RepeaterAccess(config, queue) { fail<Unit>("Revoked operation reached native access") }
+            }
+        }
+        assertFalse(queued.isCompleted)
+        always = false
+        queue.unlock()
+        assertEquals("Repeater data access changed.", queued.await().exceptionOrNull()?.message)
+        coVerify(exactly = 0) { approval.requestDataAccess(any(), any()) }
+    }
+
+    @Test
+    fun `allow-once survives its queue and revocation during an operation withholds disclosure`() = runBlocking {
+        val config = mockk<McpConfig>()
+        var requireApproval = true
+        every { config.requireDataAccessApproval } answers { requireApproval }
+        every { config.alwaysAllowRepeater } returns false
+        val approval = mockk<DataAccessApprovalHandler>()
+        coEvery { approval.requestDataAccess(DataAccessType.REPEATER, config) } returns true
+        DataAccessSecurity.approvalHandler = approval
+        val queue = Mutex(locked = true)
+        val queued = async(start = CoroutineStart.UNDISPATCHED) {
+            withM0RepeaterAccess(config, queue) { "readback" }
+        }
+        assertFalse(queued.isCompleted)
+        queue.unlock()
+        assertEquals("readback", queued.await())
+        coVerify(exactly = 1) { approval.requestDataAccess(any(), any()) }
+
+        requireApproval = false
+        val revoked = runCatching {
+            withM0RepeaterAccess(config, queue) {
+                requireApproval = true
+                "withheld readback"
+            }
+        }
+        assertEquals("Repeater data access changed.", revoked.exceptionOrNull()?.message)
+        coVerify(exactly = 1) { approval.requestDataAccess(any(), any()) }
     }
 
     @Test

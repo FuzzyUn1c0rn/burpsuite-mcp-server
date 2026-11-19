@@ -28,7 +28,7 @@ internal suspend fun observeM0AutomaticWrite(api: MontoyaApi, native: NativeRepe
         laterTurnPassed, write, fresh)
     try {
         val finished = withTimeoutOrNull(deadlineMillis) {
-            val target = native.modelContextTarget(tabId)
+            val target = native.modelContextTarget(tabId, permissionStillValid)
             val source = target.automaticSource
             if (target.view != "Hex" || source == null) return@withTimeoutOrNull outcome(false, "CAPTURED_HEX_TABLE_REQUIRED")
             stage = "WRITE_EVENT"

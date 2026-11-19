@@ -15,11 +15,6 @@ internal fun Server.registerNativeRepeaterTools(api: MontoyaApi, config: McpConf
     if (!java.lang.Boolean.getBoolean("net.portswigger.mcp.repeater.m0")) return
     val native = NativeRepeater { api.userInterface().swingUtils().suiteFrame() }
     val operations = Mutex()
-    suspend fun checkReadPermission() {
-        check(DataAccessSecurity.checkDataAccessPermission(DataAccessType.REPEATER, config)) {
-            "Repeater data access denied by Burp Suite."
-        }
-    }
 
     val probeJson = Json { encodeDefaults = true }
     mcpTool<RepeaterM0Probe>("M0 INVESTIGATION ONLY. inspect/edit/model_read require M0_UNVERIFIED_NATIVE_MODEL acknowledgement. model_read_auto requires M0_AUTO_CONTEXT_READ and one exact synchronous public event/owned popup on the frozen Hex table, read-only. model_write_bytes requires M0_BYTE_MODEL_WRITE and manual context. model_write_bytes_auto requires M0_AUTO_BYTE_MODEL_WRITE: one guarded setter then a new read-only context after callback/dispatch exit, owned cleanup, deregistration and later EDT turn. Writers require expected hash/service/version/replacementRequestBase64, shared automatic-write deadline30s, uncertainty never retry. profile_menu_inspect requires M0_PROFILE_MENU_DISCOVERY: read an already manually opened gear menu, fixed semantic tokens/public state only, no open/select/close/reset or effective-profile claim. Byte semantics probe-only, not final editor_text. Exact tool/tab already selected. No Send, view/focus/settings change, rollback or retained facade. Synthetic disposable M0 project only.") {
@@ -42,44 +37,64 @@ internal fun Server.registerNativeRepeaterTools(api: MontoyaApi, config: McpConf
         val writePlan = if (writing) M0ByteWritePlan.parse(checkNotNull(expectedModelRequestSha256), checkNotNull(expectedTargetHostname),
             checkNotNull(expectedTargetPort), checkNotNull(expectedUsesHttps), checkNotNull(expectedModelHttpVersion),
             checkNotNull(replacementRequestBase64)) else null
-        val profilePermission = if (profileDiscovery) approveM0ProfileMenuRead(config) else null
-        if (!profileDiscovery) checkReadPermission()
-        val approvedRequire = config.requireDataAccessApproval
-        val approvedAlways = config.alwaysAllowRepeater
-        fun permissionStillValid() = !config.requireDataAccessApproval || config.alwaysAllowRepeater ||
-            (config.requireDataAccessApproval == approvedRequire && config.alwaysAllowRepeater == approvedAlways)
-        operations.withLock {
+        withM0RepeaterAccess(config, operations, mayMutate = action == "edit" || writing) { allowed ->
             if (action == "edit") {
-                val snapshot = native.investigateEdit(tabId, checkNotNull(expectedFingerprint), checkNotNull(requestContent))
+                val snapshot = native.investigateEdit(tabId, checkNotNull(expectedFingerprint),
+                    checkNotNull(requestContent), allowed)
                 probeJson.encodeToString(RepeaterM0EditResult(snapshot.tabId, snapshot.fingerprint,
                     snapshot.targetHostname, snapshot.targetPort, snapshot.usesHttps))
             } else if (profileDiscovery) {
-                val allowed = checkNotNull(profilePermission)
-                val observation = inspectM0ProfileMenu(native, tabId, allowed)
-                check(allowed()) { "Repeater data access changed during inspection." }
-                probeJson.encodeToString(observation)
+                probeJson.encodeToString(inspectM0ProfileMenu(native, tabId, allowed))
             } else if (automaticWriting) {
-                probeJson.encodeToString(observeM0AutomaticWrite(api, native, tabId, checkNotNull(writePlan), ::permissionStillValid))
+                probeJson.encodeToString(observeM0AutomaticWrite(api, native, tabId, checkNotNull(writePlan), allowed))
             } else if (action == "model_read" || automaticRead || writing) {
-                val observation = observeM0ContextModel(api, native, tabId, writePlan, ::permissionStillValid,
+                val observation = observeM0ContextModel(api, native, tabId, writePlan, allowed,
                     automaticRead = automaticRead)
-                if (!writing) checkReadPermission()
                 probeJson.encodeToString(observation)
             } else {
-                probeJson.encodeToString(RepeaterM0Inspection(native.investigateControls(tabId)))
+                probeJson.encodeToString(RepeaterM0Inspection(native.investigateControls(tabId, allowed)))
             }
         }
     }
 
     mcpTool<GetRepeaterTabs>("Experimental native Swing Repeater control. Lists native tab IDs and names, including collapsed groups' request tabs. kind=group identifies headers that are not request drafts. groupPath=null means membership is unavailable in Burp's flat group layout. Selects Repeater. IDs last until server restart or tab closure; duplicate names are allowed.") {
-        checkReadPermission()
-        operations.withLock { Json.encodeToString(native.tabs()) }
+        withM0RepeaterAccess(config, operations) { Json.encodeToString(native.tabs(it)) }
     }
 
     mcpTool<GetRepeaterTab>("Experimental: selects the exact native Repeater tab ID and reads its current request, displayed response, target and fingerprint. Use get_repeater_tabs first. Only HTTP tabs in Pretty/Raw views are supported.") {
-        checkReadPermission()
-        operations.withLock { Json.encodeToString(native.read(tabId)) }
+        withM0RepeaterAccess(config, operations) { Json.encodeToString(native.read(tabId, it)) }
     }
+}
+
+/** Recheck a single approval after waiting for another draft operation and again before returning data. */
+internal suspend fun <T> withM0RepeaterAccess(config: McpConfig, operations: Mutex, mayMutate: Boolean = false,
+    operation: suspend (() -> Boolean) -> T): T {
+    val allowed = approveM0RepeaterAccess(config)
+    return operations.withLock {
+        checkM0RepeaterAccess(allowed)
+        val result = operation(allowed)
+        check(allowed()) {
+            if (mayMutate) "Repeater data access changed; draft mutation may have occurred."
+            else "Repeater data access changed."
+        }
+        result
+    }
+}
+
+internal fun checkM0RepeaterAccess(allowed: () -> Boolean) {
+    check(allowed()) { "Repeater data access changed." }
+}
+
+internal suspend fun approveM0RepeaterAccess(config: McpConfig): () -> Boolean {
+    fun policy() = config.requireDataAccessApproval to config.alwaysAllowRepeater
+    val before = policy()
+    check(DataAccessSecurity.checkDataAccessPermission(DataAccessType.REPEATER, config)) {
+        "Repeater data access denied by Burp Suite."
+    }
+    val approved = policy()
+    // Allow Once leaves both flags unchanged. Always Allow may grant persistent access during the prompt.
+    val granted = approved == before || before == (true to false) && approved == (true to true)
+    return { granted && policy() == approved }
 }
 
 @Serializable

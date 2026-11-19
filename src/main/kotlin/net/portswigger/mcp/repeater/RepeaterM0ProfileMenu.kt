@@ -7,9 +7,6 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import net.portswigger.mcp.Swing
-import net.portswigger.mcp.config.McpConfig
-import net.portswigger.mcp.security.DataAccessSecurity
-import net.portswigger.mcp.security.DataAccessType
 import java.awt.Component
 import java.util.Locale
 import javax.accessibility.AccessibleRole
@@ -23,27 +20,13 @@ internal data class M0ProfileMenuOwnership(val nativeTabIdentityValid: Boolean, 
     val invokerWithinTab: Boolean, val invokerWithinRequest: Boolean, val invokerWithinResponse: Boolean,
     val capturedActionBarPresent: Boolean, val invokerWithinActionBar: Boolean, val invokerIsActionBar: Boolean)
 
-/** A successful approval is scoped to this read and never prompts again. */
-internal suspend fun approveM0ProfileMenuRead(config: McpConfig): () -> Boolean {
-    fun policy() = config.requireDataAccessApproval to config.alwaysAllowRepeater
-    val before = policy()
-    check(DataAccessSecurity.checkDataAccessPermission(DataAccessType.REPEATER, config)) {
-        "Repeater data access denied by Burp Suite."
-    }
-    val approved = policy()
-    // A one-time approval leaves both flags unchanged. The real approval handler
-    // can also grant persistent Repeater access while the prompt is open.
-    val granted = approved == before || before == (true to false) && approved == (true to true)
-    return { granted && policy() == approved }
-}
-
 /** Reads an already manually opened menu. It never opens, selects, hides or clears one. */
 internal suspend fun inspectM0ProfileMenu(native: NativeRepeater, tabId: String,
     permission: () -> Boolean = { true },
     menuPath: () -> Array<MenuElement> = { MenuSelectionManager.defaultManager().selectedPath }): M0ProfileMenuObservation {
     if (!permission()) return unavailableProfileMenu(tabId, "PERMISSION_DENIED")
     val target = try {
-        native.modelContextTarget(tabId)
+        native.modelContextTarget(tabId, permission)
     } catch (cancel: CancellationException) {
         throw cancel
     } catch (_: Exception) {

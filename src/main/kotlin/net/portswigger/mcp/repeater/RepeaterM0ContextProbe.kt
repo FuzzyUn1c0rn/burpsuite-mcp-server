@@ -295,7 +295,7 @@ internal suspend fun observeM0ContextModel(api: MontoyaApi, native: NativeRepeat
     constructRequest: (HttpService, ByteArray) -> HttpRequest = ::constructM0ByteRequest,
     automaticRead: Boolean = false, automaticUi: M0AutomaticContextUi = M0AutomaticContextUi(),
     deadlineMillis: Long = 30_000): M0ContextModelObservation {
-    val target = native.modelContextTarget(tabId)
+    val target = native.modelContextTarget(tabId, permissionStillValid)
     require(writePlan == null || target.view == "Hex") { "M0_BYTE_WRITER_REQUIRES_HEX" }
     require(!automaticRead || writePlan == null && target.view == "Hex" && target.automaticSource != null) {
         "M0_AUTOMATIC_READ_REQUIRES_CAPTURED_HEX_TABLE"
