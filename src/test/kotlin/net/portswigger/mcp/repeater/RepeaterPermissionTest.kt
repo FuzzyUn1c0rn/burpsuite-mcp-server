@@ -82,4 +82,19 @@ class RepeaterPermissionTest {
         assertNotEquals(digest, requestFingerprint("example.test", 8443, true, request))
         assertNotEquals(digest, requestFingerprint("example.test", 443, false, request))
     }
+
+    @Test
+    fun `fingerprints normalize only header framing and retain ordered repeated values`() {
+        val head = "POST / HTTP/1.1\r\nHost: example.test\r\nX-Value: one\r\nX-Value: two"
+        val body = " café\r\n  \n"
+        val request = "$head\r\n\r\n$body"
+        fun fingerprint(text: String) = requestFingerprint("example.test", 8443, true, text)
+        val original = fingerprint(request)
+
+        assertEquals(
+            original, fingerprint(head.replace("\r\nX-Value", "\nX-Value") + "\r\n\n" + body))
+        assertNotEquals(original, fingerprint(request.replace("one\r\nX-Value: two", "two\r\nX-Value: one")))
+        assertNotEquals(original, fingerprint(request.replace("café", "cafe")))
+        assertNotEquals(original, fingerprint(request.trimEnd()))
+    }
 }

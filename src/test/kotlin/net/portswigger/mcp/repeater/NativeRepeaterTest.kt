@@ -4,8 +4,6 @@ import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import java.awt.BorderLayout
-import java.awt.event.MouseAdapter
-import java.awt.event.MouseEvent
 import javax.swing.*
 
 class NativeRepeaterTest {
@@ -226,7 +224,7 @@ class NativeRepeaterTest {
     fun `suite and group activation callbacks cannot replace captured target identity`() = runBlocking {
         for (boundary in listOf("suite", "group")) {
             for (mutation in listOf("remove", "header", "content", "reparent")) {
-                for (action in listOf("read", "edit", "send")) {
+                for (action in listOf("read", "edit")) {
                     val f = Fixture()
                     f.add("baseline")
                     val leafPane = if (boundary == "group") JTabbedPane().also {
@@ -261,7 +259,6 @@ class NativeRepeaterTest {
                             "read" -> f.native.read(before.tabId)
                             "edit" -> f.native.investigateEdit(before.tabId, before.fingerprint,
                                 before.request.replace("/one", "/REPLACED-TAB"))
-                            "send" -> f.native.send(before.tabId, before.fingerprint)
                         }
                     } }, "$boundary/$mutation during $action")
                     assertEquals(before.request, original.text)
@@ -274,9 +271,9 @@ class NativeRepeaterTest {
     }
 
     @Test
-    fun `read edit and send refuse replaced header content or reparented pane after selection`() = runBlocking {
+    fun `read and edit refuse replaced header content or reparented pane after selection`() = runBlocking {
         for (mutation in listOf("remove", "header", "content", "reparent")) {
-            for (action in listOf("read", "edit", "send")) {
+            for (action in listOf("read", "edit")) {
                 val f = Fixture()
                 f.add("baseline")
                 val original = f.add("target")
@@ -302,7 +299,6 @@ class NativeRepeaterTest {
                         "read" -> f.native.read(before.tabId)
                         "edit" -> f.native.investigateEdit(before.tabId, before.fingerprint,
                             before.request.replace("/one", "/WRONG-TAB"))
-                        "send" -> f.native.send(before.tabId, before.fingerprint)
                     }
                 } }, "$mutation during $action")
                 assertEquals(before.request, original.text, "$mutation during $action mutated original")
@@ -325,204 +321,6 @@ class NativeRepeaterTest {
         } }
         assertEquals(before.request, neighbor.text)
         assertEquals(0, f.sends)
-    }
-
-    @Test
-    fun `tab removed by selection listener never redirects send to identical neighbor`() = runBlocking {
-        val f = Fixture()
-        f.add("baseline")
-        f.add("target")
-        f.add("neighbor")
-        val before = f.native.read(f.native.tabs()[1].tabId)
-        f.removeTargetOnSelection()
-        assertThrows(IllegalArgumentException::class.java) { runBlocking {
-            f.native.send(before.tabId, before.fingerprint)
-        } }
-        assertEquals(0, f.sends)
-    }
-
-    @Test
-    fun `identity rechecked after beforeClick callback without sending neighbor`() = runBlocking {
-        val f = Fixture()
-        f.add("target")
-        f.add("neighbor")
-        val before = f.native.read(f.native.tabs().first().tabId)
-        assertThrows(IllegalArgumentException::class.java) { runBlocking {
-            f.native.send(before.tabId, before.fingerprint) { f.tabs.removeTabAt(0) }
-        } }
-        assertEquals(0, f.sends)
-    }
-
-    @Test
-    fun `send refuses request target or control changes made by beforeClick`() = runBlocking {
-        for (change in listOf("request", "equivalent fingerprint", "target", "replace", "disable", "hide", "hide page",
-            "replace listener", "reorder listeners", "busy", "ambiguous", "switch tool")) {
-            val f = Fixture()
-            val editor = f.add("target")
-            val before = f.native.read(f.native.tabs().single().tabId)
-            val panel = f.tabs.getComponentAt(0) as JPanel
-            val send = panel.components.filterIsInstance<JButton>().single { it.text == "Send" }
-            val cancel = panel.components.filterIsInstance<JButton>().single { it.text == "Cancel" }
-            if (change == "reorder listeners") {
-                SwingUtilities.invokeAndWait { send.addActionListener { f.sends++ } }
-            }
-            var hookRan = false
-            assertThrows(IllegalArgumentException::class.java, { runBlocking {
-                f.native.send(before.tabId, before.fingerprint) {
-                    assertTrue(SwingUtilities.isEventDispatchThread())
-                    hookRan = true
-                    when (change) {
-                        "request" -> editor.text = editor.text.replace("/one", "/changed")
-                        "equivalent fingerprint" -> {
-                            editor.text = editor.text.replace("\r\n", "\n")
-                            assertNotEquals(before.request, editor.text)
-                            assertEquals(before.fingerprint, requestFingerprint(
-                                before.targetHostname, before.targetPort, before.usesHttps, editor.text))
-                        }
-                        "target" -> panel.components.filterIsInstance<JLabel>().single().text =
-                            "Target: http://different.test:8080"
-                        "replace" -> {
-                            panel.remove(send)
-                            panel.add(JButton("Send").apply { addActionListener { f.sends++ } })
-                        }
-                        "disable" -> send.isEnabled = false
-                        "hide" -> send.isVisible = false
-                        "hide page" -> f.suite.selectedComponent.isVisible = false
-                        "replace listener" -> {
-                            send.removeActionListener(send.actionListeners.single())
-                            send.addActionListener { f.sends++ }
-                        }
-                        "reorder listeners" -> {
-                            val oldest = send.actionListeners.last()
-                            send.removeActionListener(oldest)
-                            send.addActionListener(oldest)
-                        }
-                        "busy" -> cancel.isEnabled = true
-                        "ambiguous" -> panel.add(JButton("Send").apply { addActionListener { f.sends++ } })
-                        "switch tool" -> f.suite.selectedIndex = 0
-                    }
-                }
-            } }, change)
-            assertTrue(hookRan, change)
-            assertEquals(0, f.sends, change)
-        }
-    }
-
-    @Test
-    fun `send refuses a replaced button model or a changed model listener`() = runBlocking {
-        for (replaceModel in listOf(true, false)) {
-            val f = Fixture()
-            f.add("target")
-            val before = f.native.read(f.native.tabs().single().tabId)
-            val panel = f.tabs.getComponentAt(0) as JPanel
-            val send = panel.components.filterIsInstance<JButton>().single { it.text == "Send" }
-            var modelActions = 0
-            var hookRan = false
-
-            assertThrows(IllegalArgumentException::class.java, {
-                runBlocking {
-                    f.native.send(before.tabId, before.fingerprint) {
-                        hookRan = true
-                        if (replaceModel) send.model = DefaultButtonModel()
-                        send.model.addActionListener { modelActions++ }
-                    }
-                }
-            }, if (replaceModel) "new button model" else "same model with a new listener")
-            assertTrue(hookRan)
-            assertEquals(0, modelActions)
-            assertEquals(0, f.sends)
-        }
-    }
-
-    @Test
-    fun `label based send clicks once only while the original control stays valid`() = runBlocking {
-        for (change in listOf("none", "replace panel", "replace label", "disable panel", "disable label",
-            "remove listener", "replace listener", "lose bounds", "mutate on press", "mutate on release")) {
-            val f = Fixture()
-            f.add("target")
-            val panel = f.tabs.getComponentAt(0) as JPanel
-            val button = panel.components.filterIsInstance<JButton>().single { it.text == "Send" }
-            val target = panel.components.filterIsInstance<JLabel>().single()
-            val label = JLabel("Send")
-            val events = mutableListOf<Int>()
-            val listener = object : MouseAdapter() {
-                override fun mousePressed(event: MouseEvent) {
-                    events.add(event.id)
-                    if (change == "mutate on press") target.text = "Target: http://different.test"
-                }
-
-                override fun mouseReleased(event: MouseEvent) {
-                    events.add(event.id)
-                    if (change == "mutate on release") target.text = "Target: http://different.test"
-                }
-
-                override fun mouseClicked(event: MouseEvent) {
-                    events.add(event.id)
-                    f.sends++
-                }
-            }
-            val control = JPanel().apply {
-                setSize(80, 28)
-                add(label)
-                addMouseListener(listener)
-            }
-            SwingUtilities.invokeAndWait {
-                panel.remove(button)
-                panel.add(control)
-            }
-            val before = f.native.read(f.native.tabs().single().tabId)
-            if (change == "none") {
-                f.native.send(before.tabId, before.fingerprint) {
-                    assertEquals(0, f.sends)
-                }
-                assertEquals(1, f.sends)
-                assertEquals(listOf(MouseEvent.MOUSE_PRESSED, MouseEvent.MOUSE_RELEASED, MouseEvent.MOUSE_CLICKED), events)
-                continue
-            }
-            if (change == "mutate on press" || change == "mutate on release") {
-                val failure = assertThrows(IllegalStateException::class.java, {
-                    runBlocking { f.native.send(before.tabId, before.fingerprint) }
-                }, change)
-                assertTrue(failure.message.orEmpty().contains("outcome is unknown"), change)
-                val expected = if (change == "mutate on press") listOf(MouseEvent.MOUSE_PRESSED)
-                    else listOf(MouseEvent.MOUSE_PRESSED, MouseEvent.MOUSE_RELEASED)
-                assertEquals(expected, events, change)
-                assertEquals(0, f.sends, change)
-                continue
-            }
-            assertThrows(IllegalArgumentException::class.java, { runBlocking {
-                f.native.send(before.tabId, before.fingerprint) {
-                    when (change) {
-                        "replace panel" -> {
-                            panel.remove(control)
-                            panel.add(JPanel().apply {
-                                setSize(80, 28)
-                                add(label)
-                                addMouseListener(listener)
-                            })
-                        }
-                        "replace label" -> {
-                            control.remove(label)
-                            control.add(JLabel("Send"))
-                        }
-                        "disable panel" -> control.isEnabled = false
-                        "disable label" -> label.isEnabled = false
-                        "remove listener" -> control.removeMouseListener(listener)
-                        "replace listener" -> {
-                            control.removeMouseListener(listener)
-                            control.addMouseListener(object : MouseAdapter() {
-                                override fun mouseClicked(event: MouseEvent) {
-                                    f.sends++
-                                }
-                            })
-                        }
-                        "lose bounds" -> control.setSize(0, 0)
-                    }
-                }
-            } }, change)
-            assertEquals(0, f.sends, change)
-            assertTrue(events.isEmpty(), change)
-        }
     }
 
     @Test
@@ -657,7 +455,7 @@ class NativeRepeaterTest {
     }
 
     @Test
-    fun `duplicate names have distinct stable ids and send only selected request`() = runBlocking {
+    fun `duplicate names have distinct stable ids and read only the selected request`() = runBlocking {
         val f = Fixture()
         f.add("same", "/one")
         f.add("same", "/two")
@@ -667,8 +465,7 @@ class NativeRepeaterTest {
         assertEquals(tabs, f.native.tabs())
         val selected = f.native.read(tabs[1].tabId)
         assertTrue(selected.request.startsWith("GET /two "))
-        f.native.send(selected.tabId, selected.fingerprint)
-        assertEquals(1, f.sends)
+        assertEquals(0, f.sends)
         assertEquals(1, f.tabs.selectedIndex)
     }
 
@@ -677,23 +474,23 @@ class NativeRepeaterTest {
         val f = Fixture()
         f.add("same")
         val tab = f.native.tabs().single()
-        val snapshot = f.native.read(tab.tabId)
+        f.native.read(tab.tabId)
         f.tabs.removeTabAt(0)
         f.add("same")
         assertThrows(IllegalStateException::class.java) {
-            runBlocking { f.native.send(tab.tabId, snapshot.fingerprint) }
+            runBlocking { f.native.read(tab.tabId) }
         }
         assertEquals(0, f.sends)
     }
 
     @Test
-    fun `request changed after read is rejected before dispatch`() = runBlocking {
+    fun `request changed after read is rejected before edit`() = runBlocking {
         val f = Fixture()
         val editor = f.add("one")
         val snapshot = f.native.read(f.native.tabs().single().tabId)
         editor.text = editor.text.replace("/one", "/changed")
         assertThrows(IllegalArgumentException::class.java) {
-            runBlocking { f.native.send(snapshot.tabId, snapshot.fingerprint) }
+            runBlocking { f.native.investigateEdit(snapshot.tabId, snapshot.fingerprint, snapshot.request.replace("/one", "/unintended")) }
         }
         assertEquals(0, f.sends)
     }
@@ -706,7 +503,7 @@ class NativeRepeaterTest {
         val panel = f.tabs.getComponentAt(0) as JPanel
         panel.components.filterIsInstance<JLabel>().single().text = "Target: https://different.test"
         assertThrows(IllegalArgumentException::class.java) {
-            runBlocking { f.native.send(snapshot.tabId, snapshot.fingerprint) }
+            runBlocking { f.native.investigateEdit(snapshot.tabId, snapshot.fingerprint, snapshot.request.replace("/one", "/unintended")) }
         }
         assertEquals(0, f.sends)
     }
@@ -722,13 +519,13 @@ class NativeRepeaterTest {
         val entry = f.native.tabs().single { it.name == "inside" }
         assertEquals(listOf("group"), entry.groupPath)
         val snapshot = f.native.read(entry.tabId)
-        f.native.send(entry.tabId, snapshot.fingerprint)
+        assertTrue(snapshot.request.startsWith("GET /inside "))
         assertEquals(1, f.tabs.selectedIndex)
-        assertEquals(1, f.sends)
+        assertEquals(0, f.sends)
     }
 
     @Test
-    fun `flat group headers are listed without selecting them and cannot be sent`() = runBlocking {
+    fun `flat group headers are listed without selecting them and cannot be read as requests`() = runBlocking {
         val f = Fixture()
         f.tabs.addTab("group", null)
         f.tabs.setTabComponentAt(0, JLabel("group"))
@@ -740,7 +537,7 @@ class NativeRepeaterTest {
         assertEquals(0, changes)
         val header = entries.single { it.kind == "group" }
         assertThrows(IllegalArgumentException::class.java) {
-            runBlocking { f.native.send(header.tabId, "unused") }
+            runBlocking { f.native.read(header.tabId) }
         }
         assertEquals(1, f.tabs.selectedIndex)
         assertEquals(0, f.sends)
@@ -769,24 +566,5 @@ class NativeRepeaterTest {
         f.suite.selectedIndex = 0
         f.native.read(entry.tabId)
         assertEquals(1, f.suite.selectedIndex)
-    }
-
-    @Test
-    fun `busy or ambiguous send control never dispatches`() = runBlocking {
-        val f = Fixture()
-        f.add("one")
-        val snapshot = f.native.read(f.native.tabs().single().tabId)
-        val panel = f.tabs.getComponentAt(0) as JPanel
-        panel.add(JButton("Send").apply { addActionListener { f.sends++ } })
-        assertThrows(IllegalArgumentException::class.java) {
-            runBlocking { f.native.send(snapshot.tabId, snapshot.fingerprint) }
-        }
-        assertEquals(0, f.sends)
-        panel.remove(panel.componentCount - 1)
-        panel.components.filterIsInstance<JButton>().single { it.text == "Cancel" }.isEnabled = true
-        assertThrows(IllegalArgumentException::class.java) {
-            runBlocking { f.native.send(snapshot.tabId, snapshot.fingerprint) }
-        }
-        assertEquals(0, f.sends)
     }
 }

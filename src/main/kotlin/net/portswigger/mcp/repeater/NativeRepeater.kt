@@ -7,18 +7,14 @@ import kotlinx.serialization.Serializable
 import net.portswigger.mcp.Swing
 import java.awt.Component
 import java.awt.Container
-import java.awt.event.InputEvent
-import java.awt.event.MouseEvent
 import java.net.URI
 import java.lang.ref.WeakReference
 import java.security.MessageDigest
-import java.util.EventListener
 import java.util.UUID
 import java.util.WeakHashMap
 import java.util.Locale
 import javax.accessibility.AccessibleState
 import javax.swing.AbstractButton
-import javax.swing.DefaultButtonModel
 import javax.swing.JLabel
 import javax.swing.JTabbedPane
 import javax.swing.JTextArea
@@ -313,130 +309,6 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         return current
     }
 
-    suspend fun awaitIdle(tabId: String) {
-        while (!withContext(Dispatchers.Swing) {
-            val selected = select(tabId)
-            val cancel = components(selected.content).filterIsInstance<AbstractButton>()
-                .filter { visibleWithin(it, selected.content) && it.text == "Cancel" }.toList()
-            cancel.size == 1 && !cancel.single().isEnabled
-        }) delay(25)
-    }
-
-    suspend fun send(tabId: String, expectedFingerprint: String, beforeClick: () -> Unit = {}) = withContext(Dispatchers.Swing) {
-        val selected = select(tabId)
-        val frame = suiteFrame()
-        val (suiteTabs, repeaterIndex) = locateRepeater(frame)
-        val repeaterRoot = suiteTabs.getComponentAt(repeaterIndex)
-
-        fun verifyReady(): RepeaterSnapshot {
-            val (currentSuiteTabs, currentIndex) = locateRepeater(frame)
-            require(suiteFrame() === frame && currentSuiteTabs === suiteTabs &&
-                suiteTabs.selectedIndex == currentIndex && suiteTabs.getComponentAt(currentIndex) === repeaterRoot &&
-                (selected.identity.first().pane === repeaterRoot ||
-                    SwingUtilities.isDescendingFrom(selected.identity.first().pane, repeaterRoot))) {
-                "Native Repeater selection changed; no request was sent."
-            }
-            val current = snapshot(selected)
-            require(visibleWithin(selected.content, frame)) {
-                "Native Repeater selection is hidden; no request was sent."
-            }
-            require(current.fingerprint == expectedFingerprint) {
-                "Repeater request or target changed. Read the tab again before sending."
-            }
-            val cancel = components(selected.content).filterIsInstance<AbstractButton>()
-                .filter { visibleWithin(it, selected.content) && it.text == "Cancel" }.toList()
-            require(cancel.size == 1 && !cancel.single().isEnabled) {
-                "Cannot verify that the Repeater tab is idle; no request was sent."
-            }
-            return current
-        }
-
-        fun findSendControl(): Pair<Component, JLabel?> {
-            val sendLabels = components(selected.content).filterIsInstance<JLabel>()
-                .filter { visibleWithin(it, selected.content) && it.text == "Send" }.toList()
-            val buttons = components(selected.content).filterIsInstance<AbstractButton>()
-                .filter { visibleWithin(it, selected.content) && it.text == "Send" }.toList()
-            if (buttons.size == 1 && sendLabels.isEmpty()) {
-                val button = buttons.single()
-                require(button.isEnabled) { "Repeater Send is disabled." }
-                return button to null
-            }
-            require(buttons.isEmpty() && sendLabels.size == 1) {
-                "Unsupported or ambiguous Repeater Send control; no request was sent."
-            }
-            // Burp 2026.10 uses a label inside a clickable panel instead of a JButton.
-            val label = sendLabels.single()
-            val control = label.parent
-            require(control != null && label.isEnabled && control.isEnabled && control.mouseListeners.isNotEmpty()) {
-                "Unsupported Repeater Send control; no request was sent."
-            }
-            require(control.width / 2 > 0 && control.height / 2 > 0) { "Repeater Send control has no usable bounds." }
-            return control to label
-        }
-
-        fun listenersFor(control: Component, label: JLabel?): Array<out EventListener> =
-            if (label == null) (control as AbstractButton).actionListeners else control.mouseListeners
-
-        fun sameListeners(expected: Array<out EventListener>, current: Array<out EventListener>): Boolean =
-            current.size == expected.size && expected.indices.all { current[it] === expected[it] }
-
-        val initial = verifyReady()
-        val (control, label) = findSendControl()
-        val listeners = listenersFor(control, label)
-        val button = if (label == null) control as AbstractButton else null
-        val buttonModel = button?.model
-        // ButtonModel itself exposes listener registration only. Sample listeners when the public model exposes them.
-        val defaultModel = buttonModel as? DefaultButtonModel
-        val modelListeners = defaultModel?.actionListeners.orEmpty()
-
-        fun verifyUnchanged() {
-            val current = verifyReady()
-            require(current.request == initial.request && current.targetHostname == initial.targetHostname &&
-                current.targetPort == initial.targetPort && current.usesHttps == initial.usesHttps) {
-                "Repeater request or target changed. Read the tab again before sending."
-            }
-            val (currentControl, currentLabel) = findSendControl()
-            require(currentControl === control && currentLabel === label) {
-                "Repeater Send control changed; no request was sent."
-            }
-            require(sameListeners(listeners, listenersFor(currentControl, currentLabel))) {
-                "Repeater Send listeners changed; no request was sent."
-            }
-            require(button?.model === buttonModel) {
-                "Repeater Send button model changed; no request was sent."
-            }
-            if (defaultModel != null) {
-                require(sameListeners(modelListeners, defaultModel.actionListeners)) {
-                    "Repeater Send button model listeners changed; no request was sent."
-                }
-            }
-        }
-
-        beforeClick()
-        verifyUnchanged()
-        if (button != null) {
-            button.doClick(0)
-        } else {
-            val now = System.currentTimeMillis()
-            val x = control.width / 2
-            val y = control.height / 2
-            // Each event can synchronously invoke application code. Once dispatch starts, the outcome is unknown
-            // if a callback fails or the remaining events can no longer be admitted.
-            try {
-                control.dispatchEvent(MouseEvent(control, MouseEvent.MOUSE_PRESSED, now,
-                    InputEvent.BUTTON1_DOWN_MASK, x, y, 1, false, MouseEvent.BUTTON1))
-                verifyUnchanged()
-                control.dispatchEvent(MouseEvent(control, MouseEvent.MOUSE_RELEASED, now + 1,
-                    0, x, y, 1, false, MouseEvent.BUTTON1))
-                verifyUnchanged()
-                control.dispatchEvent(MouseEvent(control, MouseEvent.MOUSE_CLICKED, now + 2,
-                    0, x, y, 1, false, MouseEvent.BUTTON1))
-            } catch (_: Exception) {
-                throw IllegalStateException("Repeater mouse event dispatch started; request outcome is unknown.")
-            }
-        }
-    }
-
     private data class Step(val pane: JTabbedPane, val header: Component)
     private data class WeakStep(val pane: WeakReference<JTabbedPane>, val header: WeakReference<Component>)
     private data class Entry(val description: RepeaterTab, val path: List<Step>)
@@ -509,7 +381,7 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
 
     private fun select(tabId: String, activate: Boolean = true): Selected {
         val path = paths[tabId]
-            ?: error("Repeater tab ID is unknown or closed. List tabs again; no request was sent.")
+            ?: error("Repeater tab ID is unknown or closed. List tabs again.")
         val frame = suiteFrame()
         val names = mutableListOf<String>()
         var flatGroups = false
@@ -517,15 +389,15 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         // including switching the main Burp tool or an ancestor group.
         val identity = path.map { step ->
             val pane = step.pane.get()
-                ?: error("Repeater tab is closed. List tabs again; no request was sent.")
+                ?: error("Repeater tab is closed. List tabs again.")
             val header = step.header.get()
-                ?: error("Repeater tab is closed. List tabs again; no request was sent.")
+                ?: error("Repeater tab is closed. List tabs again.")
             require(pane === frame || SwingUtilities.isDescendingFrom(pane, frame)) {
-                "Repeater tab is detached or closed. List tabs again; no request was sent."
+                "Repeater tab is detached or closed. List tabs again."
             }
             val index = (0 until pane.tabCount).singleOrNull {
                 pane.getTabComponentAt(it) === header
-            } ?: error("Repeater tab changed while selecting it; no request was sent.")
+            } ?: error("Repeater tab changed while selecting it.")
             val expectedContent = pane.getComponentAt(index)
             require(expectedContent != null) {
                 "This ID identifies a group header. List tabs and choose an ID with kind=request."
@@ -542,7 +414,7 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
                     val ownerIndex = (0 until owner.tabCount).singleOrNull {
                         val page = owner.getComponentAt(it)
                         page === pane || SwingUtilities.isDescendingFrom(pane, page)
-                    } ?: error("Repeater ancestor changed while selecting it; no request was sent.")
+                    } ?: error("Repeater ancestor changed while selecting it.")
                     if (activate) owner.selectedIndex = ownerIndex
                     else require(owner.selectedIndex == ownerIndex) { "Model context probe requires the exact tab already selected" }
                     verifySelection(identity, requireSelected = false)
