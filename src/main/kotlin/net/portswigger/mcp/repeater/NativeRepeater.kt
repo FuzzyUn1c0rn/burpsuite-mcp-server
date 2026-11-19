@@ -107,22 +107,29 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         fun regionValid(): Boolean = requestRegion != null && boundaryValid()
         fun tableValid() = requestRegion != null && hexTable != null && regionValid() &&
             visibleTables(requestRegion).singleOrNull() === hexTable
-        val actionBar = M0ActionBar.capture(selected.content, requestOwner, responseOwner)
-        M0ContextTarget(tabId, viewName, automaticSource = hexTable, readDraftUi = { limit ->
-            check(SwingUtilities.isEventDispatchThread())
+        fun verifyDraftReadView() {
             checkM0RepeaterAccess(allowed)
             verifySelection(selected.owner, selected.identity)
             if (!boundaryValid() || views.selectedIndex != viewIndex || views.getComponentAt(viewIndex) !== view ||
                 views.getTitleAt(viewIndex) != viewName || (hexTable != null && !tableValid())) {
                 throw DraftFailure("UNSUPPORTED_LAYOUT", "The owned request editor changed during the read.")
             }
+        }
+        fun visibleResponse() = components(responseOwner).filterIsInstance<JTextArea>()
+            .filter { visibleWithin(it, selected.content) && !it.isEditable }.singleOrNull()
+        val actionBar = M0ActionBar.capture(selected.content, requestOwner, responseOwner)
+        M0ContextTarget(tabId, viewName, automaticSource = hexTable, readDraftUi = { limit ->
+            check(SwingUtilities.isEventDispatchThread())
+            verifyDraftReadView()
             val target = visibleTarget(selected)
             val cancel = components(selected.content).filterIsInstance<AbstractButton>()
                 .filter { visibleWithin(it, selected.content) && it.text == "Cancel" }.singleOrNull()
-            val response = components(responseOwner).filterIsInstance<JTextArea>()
-                .filter { visibleWithin(it, responseOwner) && !it.isEditable }.singleOrNull()
-            val display = displayedDraftResponse(response?.document, limit)
-            verifySelection(selected.owner, selected.identity)
+            val response = visibleResponse()
+            val document = response?.document
+            val sampled = displayedDraftResponse(document, limit)
+            verifyDraftReadView()
+            val display = if (response != null && response.document === document && visibleResponse() === response)
+                sampled else DraftDisplayedResponse("unavailable")
             DraftUiState(selected.description, target.host, target.port.takeIf { it >= 0 }
                 ?: if (target.scheme == "https") 443 else 80, target.scheme == "https",
                 when (cancel?.isEnabled) { true -> "busy"; false -> "idle"; null -> "unverified" }, display)
@@ -438,7 +445,6 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
 
     private fun inventory(root: Component, reuseIds: Boolean): List<Entry> {
         val panes = firstTabPanes(root)
-        if (panes.isEmpty()) return emptyList()
         require(panes.size == 1) { "Unsupported Repeater tab layout." }
         val result = mutableListOf<Entry>()
         val previousByHeader = if (reuseIds) paths.entries.associateBy { it.value.last().header.get() } else emptyMap()

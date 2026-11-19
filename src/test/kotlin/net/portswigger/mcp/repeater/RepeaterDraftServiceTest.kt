@@ -4,11 +4,13 @@ import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import net.portswigger.mcp.config.McpConfig
+import net.portswigger.mcp.security.DataAccessSecurity
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import java.util.UUID
@@ -108,6 +110,62 @@ class RepeaterDraftServiceTest {
             checkCode("UNSUPPORTED_BURP")
             assertTrue(service.list(GetRepeaterTabs()).tabs.isEmpty())
             assertFalse(service.list(GetRepeaterTabs()).capabilities.adapterSupported)
+            fixture.supported = true
+            fixture.listFailure = IllegalArgumentException("Unrecognized pane")
+            assertEquals("UNSUPPORTED_LAYOUT", (runCatching { service.list(GetRepeaterTabs()) }
+                .exceptionOrNull() as DraftFailure).code)
+        }
+    }
+
+    @Test
+    fun `project changes during approval or queue waiting cannot move a draft operation to the new project`() = runBlocking {
+        val entered = CompletableDeferred<Unit>()
+        val decision = CompletableDeferred<Boolean>()
+        val original = DataAccessSecurity.approvalHandler
+        val policy = mockk<McpConfig> {
+            every { requireDataAccessApproval } returns true
+            every { alwaysAllowRepeater } returns false
+        }
+        DataAccessSecurity.approvalHandler = mockk {
+            coEvery { requestDataAccess(any(), policy) } coAnswers {
+                entered.complete(Unit)
+                decision.await()
+            }
+        }
+        try {
+            fixture.create(policy).use { service ->
+                val call = async(start = CoroutineStart.UNDISPATCHED) {
+                    runCatching { service.list(GetRepeaterTabs()) }
+                }
+                withTimeout(1000) { entered.await() }
+                fixture.project = "project after prompt"
+                decision.complete(true)
+                assertEquals("INSTANCE_MISMATCH", (call.await().exceptionOrNull() as DraftFailure).code)
+                assertNull(service.instanceId)
+            }
+        } finally {
+            DataAccessSecurity.approvalHandler = original
+        }
+
+        fixture.create().use { service ->
+            val old = service.list(GetRepeaterTabs())
+            val reading = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            fixture.beforeRead = { reading.complete(Unit); release.await() }
+            val currentRead = async(start = CoroutineStart.UNDISPATCHED) {
+                runCatching { service.read(GetRepeaterTab(old.tabs.first().tabId)) }
+            }
+            withTimeout(1000) { reading.await() }
+            val queuedList = async(start = CoroutineStart.UNDISPATCHED) {
+                runCatching { service.list(GetRepeaterTabs()) }
+            }
+            assertFalse(queuedList.isCompleted)
+            fixture.project = "project after queue"
+            release.complete(Unit)
+            assertEquals("INSTANCE_MISMATCH", (currentRead.await().exceptionOrNull() as DraftFailure).code)
+            assertEquals("INSTANCE_MISMATCH", (queuedList.await().exceptionOrNull() as DraftFailure).code)
+            assertEquals(old.serverInstanceId, service.instanceId)
+            assertNotEquals(old.serverInstanceId, service.list(GetRepeaterTabs()).serverInstanceId)
         }
     }
 
@@ -149,11 +207,12 @@ internal class DraftServiceFixture {
     @Volatile var tls = true
     @Volatile var responseText: String? = "\uD83E\uDDEA".repeat(20_001)
     @Volatile var reads = 0
+    @Volatile var listFailure: RuntimeException? = null
     @Volatile var beforeRead: suspend () -> Unit = {}
 
     fun create(policy: McpConfig = config) = RepeaterDraftService(policy, { project },
         { DraftCapabilities("2026.11.2", "COMMUNITY_EDITION", supported) }, newNative = {
-            mockk { coEvery { tabs(any()) } returns entries }
+            mockk { coEvery { tabs(any()) } coAnswers { listFailure?.let { throw it }; entries } }
         }, readModel = { _, id, preview, _ ->
             beforeRead()
             reads++

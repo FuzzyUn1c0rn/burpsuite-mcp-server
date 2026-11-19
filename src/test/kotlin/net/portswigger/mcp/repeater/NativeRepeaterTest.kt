@@ -7,6 +7,7 @@ import java.awt.BorderLayout
 import javax.swing.*
 import javax.swing.event.DocumentEvent
 import javax.swing.event.DocumentListener
+import javax.swing.text.PlainDocument
 
 class NativeRepeaterTest {
     private class NullHexFixture {
@@ -52,6 +53,32 @@ class NativeRepeaterTest {
             assertEquals("available", sample(0).response.availability)
             response.text = ""
             assertEquals("empty_or_not_rendered", sample(4000).response.availability)
+        }
+    }
+
+    @Test
+    fun `response reparented during document sampling remains unavailable`() = runBlocking {
+        val fixture = NullHexFixture().apply { prepare() }
+        val target = fixture.f.native.modelContextTarget(fixture.id, activate = true)
+        SwingUtilities.invokeAndWait {
+            val response = JTextArea().apply { isEditable = false }
+            val other = fixture.f.suite.getComponentAt(0) as JPanel
+            var moveOnRead = false
+            val document = object : PlainDocument() {
+                override fun getText(offset: Int, length: Int): String {
+                    val text = super.getText(offset, length)
+                    if (moveOnRead) other.add(response)
+                    return text
+                }
+            }
+            document.insertString(0, "Detached response", null)
+            response.document = document
+            fixture.responseRegion.add(response)
+            moveOnRead = true
+            val display = checkNotNull(target.readDraftUi)(4000).response
+            assertSame(other, response.parent)
+            assertEquals("unavailable", display.availability)
+            assertNull(display.preview)
         }
     }
 
@@ -532,7 +559,17 @@ class NativeRepeaterTest {
         }
         assertEquals(before.request, editor.text)
         assertEquals(1, f.suite.selectedIndex)
+        val failure = assertThrows(IllegalArgumentException::class.java) { runBlocking { f.native.tabs() } }
+        assertEquals("Unsupported Repeater tab layout.", failure.message)
+    }
+
+    @Test
+    fun `empty native pane is distinct from a Repeater page without a recognizable pane`() = runBlocking {
+        val f = Fixture()
         assertTrue(f.native.tabs().isEmpty())
+        SwingUtilities.invokeAndWait { f.tabs.parent.remove(f.tabs) }
+        val failure = assertThrows(IllegalArgumentException::class.java) { runBlocking { f.native.tabs() } }
+        assertEquals("Unsupported Repeater tab layout.", failure.message)
     }
 
     @Test

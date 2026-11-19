@@ -10,7 +10,10 @@ import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import net.portswigger.mcp.schema.asInputSchema
 import kotlin.reflect.KClass
 import kotlinx.coroutines.sync.Mutex
@@ -104,7 +107,19 @@ private fun <I : Any, O> Server.addDraftReadTool(name: String, description: Stri
             isError = true
         )
         try {
-            val args = draftJson.decodeFromJsonElement(serializer, request.params.arguments ?: JsonObject(emptyMap()))
+            val arguments = request.params.arguments ?: JsonObject(emptyMap())
+            // The serialization decoder also accepts some quoted numbers and booleans.
+            // Reject values that do not have the JSON type advertised for this argument.
+            if (arguments.any { (key, value) ->
+                    val primitive = value as? JsonPrimitive ?: return@any true
+                    when (properties[key]?.jsonObject?.get("type")?.jsonPrimitive?.content) {
+                        "string" -> !primitive.isString
+                        "integer" -> primitive.isString || primitive.intOrNull == null
+                        "boolean" -> primitive.isString || primitive.booleanOrNull == null
+                        else -> true
+                    }
+                }) return@addTool error("INVALID_ARGUMENT", "Check Repeater tool arguments and types.")
+            val args = draftJson.decodeFromJsonElement(serializer, arguments)
             tabId = id(args)?.takeIf(draftTabIdPattern::matches)
             CallToolResult(content = listOf(TextContent(draftJson.encodeToString(output, execute(args)))), isError = false)
         } catch (canceled: CancellationException) {

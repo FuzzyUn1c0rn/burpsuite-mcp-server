@@ -159,13 +159,22 @@ internal class RepeaterDraftService(
         operation: suspend (Instance, () -> Boolean) -> T): T = coroutineScope {
         val closeHandler = lifetime.invokeOnCompletion { cancel("Repeater service closed") }
         try {
-            withM0RepeaterAccess(config, operations, mayMutate) { permission ->
-                val project = projectId()
-                val current = instance?.takeIf { it.project == project }
-                    ?: Instance(project, UUID.randomUUID().toString(), newNative()).also { instance = it }
-                val result = operation(current) { permission() && lifetime.isActive && projectId() == project }
+            val project = projectId()
+            fun checkProject() {
                 if (projectId() != project)
                     throw DraftFailure("INSTANCE_MISMATCH", "The Burp project changed. List tabs again.")
+            }
+            withM0RepeaterAccess(config, operations, mayMutate) { permission ->
+                checkProject()
+                val current = instance?.takeIf { it.project == project }
+                    ?: Instance(project, UUID.randomUUID().toString(), newNative()).also { instance = it }
+                val result = try {
+                    operation(current) { permission() && lifetime.isActive && projectId() == project }
+                } catch (failure: DraftFailure) {
+                    checkProject()
+                    throw failure
+                }
+                checkProject()
                 result
             }
         } finally {

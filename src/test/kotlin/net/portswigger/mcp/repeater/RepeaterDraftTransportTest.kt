@@ -79,6 +79,15 @@ class RepeaterDraftTransportTest {
             val listed = sse.list()
             assertEquals(listed, streamable.list())
             val id = listed.tabs.first().tabId
+            for (client in listOf(sse, streamable)) {
+                val wrongCount = checkNotNull(client.callTool("get_repeater_tabs", mapOf("count" to "1")))
+                val wrongFlag = checkNotNull(client.callTool("get_repeater_tab",
+                    mapOf("tabId" to id, "includeRequest" to "false")))
+                for (invalid in listOf(wrongCount, wrongFlag)) {
+                    assertEquals(true, invalid.isError)
+                    assertEquals("INVALID_ARGUMENT", Json.decodeFromString<DraftError>(invalid.text()).code)
+                }
+            }
             val full = streamable.read(id)
             assertEquals("available", full.displayedResponse.availability)
             assertEquals("\uD83E\uDDEA".repeat(4_000), full.displayedResponse.preview)
