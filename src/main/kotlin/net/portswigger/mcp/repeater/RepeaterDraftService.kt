@@ -2,6 +2,7 @@ package net.portswigger.mcp.repeater
 
 import burp.api.montoya.MontoyaApi
 import burp.api.montoya.core.BurpSuiteEdition
+import burp.api.montoya.core.Version
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -27,6 +28,8 @@ internal const val DRAFT_DEFAULT_PAGE = 50
 internal const val DRAFT_MAX_PAGE = 200
 internal const val DRAFT_DEFAULT_PREVIEW = 4_000
 internal const val DRAFT_MAX_PREVIEW = 20_000
+// Montoya's buildNumber() for 2026.11.2-55152, including the release components.
+private const val SUPPORTED_REPEATER_MONTOYA_BUILD = 20261102000055152L
 
 internal class DraftFailure(val code: String, message: String) : IllegalStateException(message)
 
@@ -209,14 +212,15 @@ internal fun displayedDraftResponse(document: Document?, limit: Int?): DraftDisp
 
 internal fun newRepeaterDraftService(api: MontoyaApi, config: McpConfig): RepeaterDraftService =
     RepeaterDraftService(config, projectId = { api.project().id() }, capabilities = {
-        val version = api.burpSuite().version()
-        val release = version.toString()
-        val edition = version.edition()
-        DraftCapabilities(release, edition.name,
-            System.getProperty("os.name").startsWith("Windows") &&
-                edition == BurpSuiteEdition.COMMUNITY_EDITION && version.buildNumber() == 55152L)
+        draftCapabilities(api.burpSuite().version(), System.getProperty("os.name"))
     }, newNative = { NativeRepeater { api.userInterface().swingUtils().suiteFrame() } },
         readModel = { native, id, limit, allowed -> readOwnedDraft(api, native, id, limit, allowed) })
+
+internal fun draftCapabilities(version: Version, osName: String): DraftCapabilities {
+    val edition = version.edition()
+    return DraftCapabilities(version.toString(), edition.name, osName.startsWith("Windows") &&
+        edition == BurpSuiteEdition.COMMUNITY_EDITION && version.buildNumber() == SUPPORTED_REPEATER_MONTOYA_BUILD)
+}
 
 private suspend fun readOwnedDraft(api: MontoyaApi, native: NativeRepeater, id: String, limit: Int?,
     allowed: () -> Boolean): ObservedDraft {

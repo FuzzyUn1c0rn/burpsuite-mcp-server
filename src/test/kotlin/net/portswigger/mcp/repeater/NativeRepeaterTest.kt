@@ -7,6 +7,7 @@ import java.awt.BorderLayout
 import javax.swing.*
 import javax.swing.event.DocumentEvent
 import javax.swing.event.DocumentListener
+import javax.swing.text.Document
 import javax.swing.text.PlainDocument
 
 class NativeRepeaterTest {
@@ -79,6 +80,31 @@ class NativeRepeaterTest {
             assertSame(other, response.parent)
             assertEquals("unavailable", display.availability)
             assertNull(display.preview)
+        }
+    }
+
+    @Test
+    fun `response owner reparented by final document getter invalidates the draft read`() = runBlocking {
+        val fixture = NullHexFixture().apply { prepare() }
+        val target = fixture.f.native.modelContextTarget(fixture.id, activate = true)
+        SwingUtilities.invokeAndWait {
+            val detached = JPanel()
+            var documentReads = 0
+            var trackDocumentReads = false
+            val response = object : JTextArea("Detached response") {
+                override fun getDocument(): Document? {
+                    if (trackDocumentReads && ++documentReads == 2) detached.add(fixture.responseRegion)
+                    return super.getDocument()
+                }
+            }.apply { isEditable = false }
+            fixture.responseRegion.add(response)
+            trackDocumentReads = true
+
+            val failure = assertThrows(DraftFailure::class.java) {
+                checkNotNull(target.readDraftUi)(4000)
+            }
+            assertSame(detached, fixture.responseRegion.parent)
+            assertEquals("UNSUPPORTED_LAYOUT", failure.code)
         }
     }
 

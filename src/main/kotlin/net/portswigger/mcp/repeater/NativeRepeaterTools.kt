@@ -74,10 +74,10 @@ internal fun Server.registerNativeRepeaterTools(api: MontoyaApi, config: McpConf
 
     addDraftReadTool("get_repeater_tabs",
         "List a page of native Repeater drafts and groups. May select the main Repeater tool.",
-        GetRepeaterTabs::class, GetRepeaterTabs.serializer(), DraftTabList.serializer(), service, { null }, service::list)
+        GetRepeaterTabs::class, GetRepeaterTabs.serializer(), DraftTabList.serializer(), service, service::list)
     addDraftReadTool("get_repeater_tab",
         "Read one native draft by ID. Select Hex in that draft for model-backed reads. A displayed response may belong to an earlier draft.",
-        GetRepeaterTab::class, GetRepeaterTab.serializer(), DraftTabRead.serializer(), service, { it.tabId }, service::read)
+        GetRepeaterTab::class, GetRepeaterTab.serializer(), DraftTabRead.serializer(), service, service::read)
     return service
 }
 
@@ -85,7 +85,7 @@ private val draftJson = Json { encodeDefaults = true }
 
 private fun <I : Any, O> Server.addDraftReadTool(name: String, description: String, input: KClass<I>,
     serializer: KSerializer<I>, output: KSerializer<O>, service: RepeaterDraftService,
-    id: (I) -> String?, execute: suspend (I) -> O) {
+    execute: suspend (I) -> O) {
     val reflected = input.asInputSchema()
     val properties = reflected.properties.orEmpty().mapValues { (key, value) ->
         val options = when (key) {
@@ -101,13 +101,15 @@ private fun <I : Any, O> Server.addDraftReadTool(name: String, description: Stri
     }
     val schema = ToolSchema(properties = JsonObject(properties), required = reflected.required)
     addTool(name = name, description = description, inputSchema = schema, handler = { request ->
-        var tabId: String? = null
+        val arguments = request.params.arguments ?: JsonObject(emptyMap())
+        val suppliedTabId = arguments["tabId"] as? JsonPrimitive
+        val tabId = suppliedTabId?.takeIf { "tabId" in properties && it.isString &&
+            draftTabIdPattern.matches(it.content) }?.content
         fun error(code: String, message: String): CallToolResult = CallToolResult(
             content = listOf(TextContent(draftJson.encodeToString(DraftError(code, message, service.instanceId, tabId)))),
             isError = true
         )
         try {
-            val arguments = request.params.arguments ?: JsonObject(emptyMap())
             // The serialization decoder also accepts some quoted numbers and booleans.
             // Reject values that do not have the JSON type advertised for this argument.
             if (arguments.any { (key, value) ->
@@ -120,7 +122,6 @@ private fun <I : Any, O> Server.addDraftReadTool(name: String, description: Stri
                     }
                 }) return@addTool error("INVALID_ARGUMENT", "Check Repeater tool arguments and types.")
             val args = draftJson.decodeFromJsonElement(serializer, arguments)
-            tabId = id(args)?.takeIf(draftTabIdPattern::matches)
             CallToolResult(content = listOf(TextContent(draftJson.encodeToString(output, execute(args)))), isError = false)
         } catch (canceled: CancellationException) {
             throw canceled

@@ -40,9 +40,11 @@ class NativeRepeaterRegistrationTest {
                     every { request.params.arguments } returns args?.let { Json.parseToJsonElement(it).jsonObject }
                 }
                 fun body(result: CallToolResult) = (result.content.single() as TextContent).text
-                fun invalid(result: CallToolResult) {
+                fun invalid(result: CallToolResult, expectedTabId: String? = null) {
                     assertEquals(true, result.isError)
-                    assertEquals("INVALID_ARGUMENT", Json.decodeFromString<DraftError>(body(result)).code)
+                    val error = Json.decodeFromString<DraftError>(body(result))
+                    assertEquals("INVALID_ARGUMENT", error.code)
+                    assertEquals(expectedTabId, error.tabId)
                 }
 
                 for (args in listOf("""{"count":"1"}""", """{"offset":"0"}""", """{"count":true}""",
@@ -54,9 +56,11 @@ class NativeRepeaterRegistrationTest {
                 val id = listed.tabs.first().tabId
                 for (fragment in listOf(""""includeRequest":"false"""", """"includeResponse":0""",
                     """"maxResponseLength":"0"""", """"maxResponseLength":null""")) {
-                    invalid(read.captured(connection, request("""{"tabId":"$id",$fragment}""")))
+                    invalid(read.captured(connection, request("""{"tabId":"$id",$fragment}""")), id)
                 }
+                invalid(list.captured(connection, request("""{"tabId":"$id"}""")))
                 invalid(read.captured(connection, request("""{"tabId":42}""")))
+                invalid(read.captured(connection, request("""{"tabId":"unrecognized","includeRequest":"false"}""")))
                 assertEquals(0, fixture.reads)
                 val accepted = Json.decodeFromString<DraftTabRead>(body(read.captured(connection,
                     request("""{"tabId":"$id","includeRequest":false,"maxResponseLength":0}"""))))

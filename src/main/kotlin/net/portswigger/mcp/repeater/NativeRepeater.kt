@@ -116,7 +116,7 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
             }
         }
         fun visibleResponse() = components(responseOwner).filterIsInstance<JTextArea>()
-            .filter { visibleWithin(it, selected.content) && !it.isEditable }.singleOrNull()
+            .filter { !it.isEditable && visibleWithin(it, responseOwner) }.singleOrNull()
         val actionBar = M0ActionBar.capture(selected.content, requestOwner, responseOwner)
         M0ContextTarget(tabId, viewName, automaticSource = hexTable, readDraftUi = { limit ->
             check(SwingUtilities.isEventDispatchThread())
@@ -127,9 +127,11 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
             val response = visibleResponse()
             val document = response?.document
             val sampled = displayedDraftResponse(document, limit)
+            val responseStillOwned = response != null && visibleResponse() === response &&
+                response.document === document && visibleWithin(response, responseOwner) &&
+                visibleWithin(responseOwner, selected.content)
             verifyDraftReadView()
-            val display = if (response != null && response.document === document && visibleResponse() === response)
-                sampled else DraftDisplayedResponse("unavailable")
+            val display = if (responseStillOwned) sampled else DraftDisplayedResponse("unavailable")
             DraftUiState(selected.description, target.host, target.port.takeIf { it >= 0 }
                 ?: if (target.scheme == "https") 443 else 80, target.scheme == "https",
                 when (cancel?.isEnabled) { true -> "busy"; false -> "idle"; null -> "unverified" }, display)
@@ -582,8 +584,15 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         if (root is Container) for (child in root.components) yieldAll(components(child))
     }
 
-    private fun visibleWithin(component: Component, root: Component): Boolean =
-        generateSequence(component) { if (it === root) null else it.parent }.all { it.isVisible }
+    private fun visibleWithin(component: Component, root: Component): Boolean {
+        var current: Component? = component
+        while (current != null) {
+            if (!current.isVisible) return false
+            if (current === root) return true
+            current = current.parent
+        }
+        return false
+    }
 
     companion object {
         private val ACCESSIBLE_STATES = listOf(

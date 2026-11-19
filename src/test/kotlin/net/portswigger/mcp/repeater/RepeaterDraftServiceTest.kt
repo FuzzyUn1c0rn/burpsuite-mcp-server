@@ -1,5 +1,7 @@
 package net.portswigger.mcp.repeater
 
+import burp.api.montoya.core.BurpSuiteEdition
+import burp.api.montoya.core.Version
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
@@ -18,6 +20,35 @@ import javax.swing.text.PlainDocument
 
 class RepeaterDraftServiceTest {
     private val fixture = DraftServiceFixture()
+
+    @Test
+    fun `native capabilities require the observed Montoya build on Windows Community Edition`() {
+        val release = "Burp Suite Community Edition 2026.11.2-55152"
+        val observedBuild = 20261102000055152L
+        fun version(build: Long = observedBuild, edition: BurpSuiteEdition = BurpSuiteEdition.COMMUNITY_EDITION) =
+            mockk<Version>().also { version ->
+                every { version.toString() } returns release
+                every { version.edition() } returns edition
+                every { version.buildNumber() } returns build
+            }
+
+        val supported = draftCapabilities(version(), "Windows 11")
+        assertTrue(supported.adapterSupported)
+        assertEquals(release, supported.burpVersion)
+        assertEquals("COMMUNITY_EDITION", supported.burpEdition)
+        assertNull(supported.unsupportedReason)
+
+        for (unsupported in listOf(
+            draftCapabilities(version(build = 55152L), "Windows 11"),
+            draftCapabilities(version(build = observedBuild + 1), "Windows 11"),
+            draftCapabilities(version(edition = BurpSuiteEdition.PROFESSIONAL), "Windows 11"),
+            draftCapabilities(version(), "Linux")
+        )) {
+            assertFalse(unsupported.adapterSupported)
+            assertEquals("UNSUPPORTED_BURP", unsupported.unsupportedReason)
+            assertTrue(unsupported.editorModes.isEmpty())
+        }
+    }
 
     @Test
     fun `paged listing shares identities without reading drafts and handles extreme offsets`() = runBlocking {

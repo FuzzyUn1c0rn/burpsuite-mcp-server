@@ -87,6 +87,8 @@ class RepeaterDraftTransportTest {
                     assertEquals(true, invalid.isError)
                     assertEquals("INVALID_ARGUMENT", Json.decodeFromString<DraftError>(invalid.text()).code)
                 }
+                assertNull(Json.decodeFromString<DraftError>(wrongCount.text()).tabId)
+                assertEquals(id, Json.decodeFromString<DraftError>(wrongFlag.text()).tabId)
             }
             val full = streamable.read(id)
             assertEquals("available", full.displayedResponse.availability)
