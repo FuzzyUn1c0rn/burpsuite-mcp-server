@@ -24,6 +24,7 @@ import javax.swing.SwingUtilities
 internal class NativeRepeater(private val suiteFrame: () -> Component) {
     // Accessed only on the event dispatch thread.
     private val paths = mutableMapOf<String, List<WeakStep>>()
+    private var listedOwner: WeakRepeaterOwner? = null
 
     /** Read-only M0 context experiment: never switches Pretty/Raw/Hex. */
     suspend fun modelContextTarget(tabId: String, allowed: () -> Boolean = { true }): M0ContextTarget = withContext(Dispatchers.Swing) {
@@ -100,7 +101,7 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         val actionBar = M0ActionBar.capture(selected.content, requestOwner, responseOwner)
         M0ContextTarget(tabId, viewName, automaticSource = hexTable, captureProfileMenuInvoker = { invoker ->
             check(SwingUtilities.isEventDispatchThread())
-            val tabValid = try { verifySelection(selected.identity); true } catch (_: Exception) { false }
+            val tabValid = try { verifySelection(selected.owner, selected.identity); true } catch (_: Exception) { false }
             val withinTab = invoker === selected.content || SwingUtilities.isDescendingFrom(invoker, selected.content)
             val invokerPath = if (withinTab) pathTo(invoker, selected.content) else emptyList()
             val inRequest = invoker === requestOwner || SwingUtilities.isDescendingFrom(invoker, requestOwner)
@@ -111,20 +112,20 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
             M0ProfileMenuInvokerLease(ownership) {
                 check(SwingUtilities.isEventDispatchThread())
                 try {
-                    verifySelection(selected.identity)
+                    verifySelection(selected.owner, selected.identity)
                     withinTab && invokerPath.isNotEmpty() && pathValid(invokerPath) && boundaryValid() &&
                         !inRequest && !inResponse && actionBar?.containsControl(invoker) == true
                 } catch (_: Exception) { false }
             }
         }, canMutateNow = {
             check(SwingUtilities.isEventDispatchThread())
-            verifySelection(selected.identity)
+            verifySelection(selected.owner, selected.identity)
             boundaryValid() && actionBar?.ready() == true
         }, matchesNativeService = { host, port, tls ->
             actionBar?.matchesService(host, port, tls) == true
         }, describeMutationReadiness = {
             check(SwingUtilities.isEventDispatchThread())
-            val tabValid = try { verifySelection(selected.identity); true } catch (_: Exception) { false }
+            val tabValid = try { verifySelection(selected.owner, selected.identity); true } catch (_: Exception) { false }
             val cancel = components(selected.content).filterIsInstance<AbstractButton>()
                 .filter { visibleWithin(it, selected.content) && it.text == "Cancel" }.toList()
             val send = components(selected.content).filter { component ->
@@ -160,7 +161,7 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
                 diagnosticException = true
                 null
             }
-            val tabValid = try { verifySelection(selected.identity); true } catch (_: Exception) { false }
+            val tabValid = try { verifySelection(selected.owner, selected.identity); true } catch (_: Exception) { false }
             val indexMatches = checkState { views.selectedIndex == viewIndex }
             val componentMatches = checkState { views.getComponentAt(viewIndex) === view }
             val titleMatches = checkState { views.getTitleAt(viewIndex) == viewName }
@@ -191,7 +192,7 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         }) { source ->
             if (!SwingUtilities.isEventDispatchThread()) false
             else try {
-                verifySelection(selected.identity)
+                verifySelection(selected.owner, selected.identity)
                 views.selectedIndex == viewIndex && views.getComponentAt(viewIndex) === view &&
                     views.getTitleAt(viewIndex) == viewName &&
                     SwingUtilities.isDescendingFrom(views, selected.content) && boundaryValid() &&
@@ -224,7 +225,7 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
             val oldProtocol = before.request.lineSequence().first().substringAfterLast(" ").trim()
             val newProtocol = request.lineSequence().first().substringAfterLast(" ").trim()
             require(oldProtocol == newProtocol) { "Request-line protocol changes are outside this probe" }
-            verifySelection(selected.identity)
+            verifySelection(selected.owner, selected.identity)
             checkM0RepeaterAccess(allowed)
             editors.single().text = request
             check(allowed()) { "Repeater data access changed; draft mutation may have occurred." }
@@ -239,7 +240,7 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         checkM0RepeaterAccess(allowed)
         val selected = select(tabId)
         checkM0RepeaterAccess(allowed)
-        components(selected.content).mapNotNull { component ->
+        val controls = components(selected.content).mapNotNull { component ->
             val text = when (component) {
                 is AbstractButton -> component.text
                 is JLabel -> component.text
@@ -263,11 +264,24 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
                     pane.selectedIndex.takeIf { it >= 0 }?.let { pane.getTitleAt(it)?.takeIf(EDITOR_LABEL::matches) }
                 })
         }.take(200).toList()
+        verifySelection(selected.owner, selected.identity)
+        controls
     }
 
     suspend fun tabs(allowed: () -> Boolean = { true }): List<RepeaterTab> = withContext(Dispatchers.Swing) {
         checkM0RepeaterAccess(allowed)
-        val entries = inventory(allowed)
+        val frame = suiteFrame()
+        val (suiteTabs, repeaterIndex) = locateRepeater(frame)
+        val owner = RepeaterOwner(frame, suiteTabs, suiteTabs.getComponentAt(repeaterIndex))
+        suiteTabs.selectedIndex = repeaterIndex
+        checkM0RepeaterAccess(allowed)
+        verifyRepeaterOwner(owner, requireSelected = true)
+        val entries = inventory(owner.root, listedOwner?.matches(owner) == true)
+        verifyRepeaterOwner(owner, requireSelected = true)
+        require(entries.isEmpty() || firstTabPanes(owner.root).singleOrNull() === entries.first().path.first().pane) {
+            "Native Repeater pane moved or was replaced. List tabs again."
+        }
+        listedOwner = WeakRepeaterOwner(owner)
         paths.clear()
         entries.forEach { entry ->
             paths[entry.description.tabId] = entry.path.map {
@@ -334,14 +348,38 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
             if (step.content == null) content == null else content?.get() === step.content
     }
     private data class Entry(val description: RepeaterTab, val path: List<Step>)
-    private data class SelectionIdentity(val pane: JTabbedPane, val header: Component, val content: Component)
-    private data class Selected(val description: RepeaterTab, val content: Component, val identity: List<SelectionIdentity>)
+    private class RepeaterOwner(val frame: Component, val suiteTabs: JTabbedPane, val root: Component)
+    private class WeakRepeaterOwner(owner: RepeaterOwner) {
+        private val frame = WeakReference(owner.frame)
+        private val suiteTabs = WeakReference(owner.suiteTabs)
+        private val root = WeakReference(owner.root)
 
-    private fun verifySelection(identity: List<SelectionIdentity>, requireSelected: Boolean = true) {
-        val frame = suiteFrame()
+        fun matches(owner: RepeaterOwner) =
+            frame.get() === owner.frame && suiteTabs.get() === owner.suiteTabs && root.get() === owner.root
+    }
+
+    private data class SelectionIdentity(val pane: JTabbedPane, val header: Component, val content: Component)
+    private data class Selected(val description: RepeaterTab, val content: Component,
+        val owner: RepeaterOwner, val identity: List<SelectionIdentity>)
+
+    private fun verifyRepeaterOwner(owner: RepeaterOwner, requireSelected: Boolean) {
+        val index = owner.suiteTabs.indexOfComponent(owner.root)
+        require(suiteFrame() === owner.frame &&
+            (owner.suiteTabs === owner.frame || SwingUtilities.isDescendingFrom(owner.suiteTabs, owner.frame)) &&
+            index >= 0 && owner.suiteTabs.getTitleAt(index) == "Repeater" &&
+            (!requireSelected || owner.suiteTabs.selectedComponent === owner.root)) {
+            "Native Repeater page changed. List tabs again."
+        }
+    }
+
+    private fun verifySelection(owner: RepeaterOwner, identity: List<SelectionIdentity>, requireSelected: Boolean = true) {
+        verifyRepeaterOwner(owner, requireSelected)
+        require(firstTabPanes(owner.root).singleOrNull() === identity.first().pane) {
+            "Native Repeater pane moved or was replaced. List tabs again."
+        }
         identity.forEach { selected ->
             val pane = selected.pane
-            require(pane === frame || SwingUtilities.isDescendingFrom(pane, frame)) {
+            require(pane === owner.root || SwingUtilities.isDescendingFrom(pane, owner.root)) {
                 "Repeater tab detached or closed during selection; no neighboring tab may be used."
             }
             val index = (0 until pane.tabCount).singleOrNull { pane.getTabComponentAt(it) === selected.header }
@@ -365,19 +403,12 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         return roots.single()
     }
 
-    private fun inventory(allowed: () -> Boolean): List<Entry> {
-        val (suiteTabs, repeaterIndex) = locateRepeater(suiteFrame())
-        suiteTabs.selectedIndex = repeaterIndex
-        checkM0RepeaterAccess(allowed)
-        return inventory(suiteTabs.getComponentAt(repeaterIndex))
-    }
-
-    private fun inventory(root: Component): List<Entry> {
+    private fun inventory(root: Component, reuseIds: Boolean): List<Entry> {
         val panes = firstTabPanes(root)
         if (panes.isEmpty()) return emptyList()
         require(panes.size == 1) { "Unsupported Repeater tab layout." }
         val result = mutableListOf<Entry>()
-        val previousByHeader = paths.entries.associateBy { it.value.last().header.get() }
+        val previousByHeader = if (reuseIds) paths.entries.associateBy { it.value.last().header.get() } else emptyMap()
         fun collect(pane: JTabbedPane, path: List<Step>, names: List<String>) {
             val flatGroups = (0 until pane.tabCount).any { pane.getComponentAt(it) == null }
             for (index in 0 until pane.tabCount) {
@@ -410,6 +441,9 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         val path = paths[tabId]
             ?: error("Repeater tab ID is unknown or closed. List tabs again.")
         val frame = suiteFrame()
+        val (suiteTabs, repeaterIndex) = locateRepeater(frame)
+        val owner = RepeaterOwner(frame, suiteTabs, suiteTabs.getComponentAt(repeaterIndex))
+        require(listedOwner?.matches(owner) == true) { "Native Repeater page changed. List tabs again." }
         val names = mutableListOf<String>()
         var flatGroups = false
         // Capture the entire path before ANY selection can invoke application callbacks,
@@ -419,7 +453,7 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
                 ?: error("Repeater tab is closed. List tabs again.")
             val header = step.header.get()
                 ?: error("Repeater tab is closed. List tabs again.")
-            require(pane === frame || SwingUtilities.isDescendingFrom(pane, frame)) {
+            require(pane === owner.root || SwingUtilities.isDescendingFrom(pane, owner.root)) {
                 "Repeater tab is detached or closed. List tabs again."
             }
             val index = (0 until pane.tabCount).singleOrNull {
@@ -435,20 +469,20 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
             }
             SelectionIdentity(pane, header, expectedContent)
         }
-        verifySelection(identity, requireSelected = false)
+        verifySelection(owner, identity, requireSelected = false)
         identity.forEachIndexed { stepIndex, selected ->
             val pane = selected.pane
             val header = selected.header
             // A client can call this while another main Burp tool is selected.
             generateSequence(pane.parent) { it.parent }.filterIsInstance<JTabbedPane>().toList().asReversed()
-                .forEach { owner ->
-                    val ownerIndex = (0 until owner.tabCount).singleOrNull {
-                        val page = owner.getComponentAt(it)
+                .forEach { ancestor ->
+                    val ownerIndex = (0 until ancestor.tabCount).singleOrNull {
+                        val page = ancestor.getComponentAt(it)
                         page === pane || SwingUtilities.isDescendingFrom(pane, page)
                     } ?: error("Repeater ancestor changed while selecting it.")
-                    if (activate) owner.selectedIndex = ownerIndex
-                    else require(owner.selectedIndex == ownerIndex) { "Model context probe requires the exact tab already selected" }
-                    verifySelection(identity, requireSelected = false)
+                    if (activate) ancestor.selectedIndex = ownerIndex
+                    else require(ancestor.selectedIndex == ownerIndex) { "Model context probe requires the exact tab already selected" }
+                    verifySelection(owner, identity, requireSelected = false)
                 }
             val index = (0 until pane.tabCount).single { pane.getTabComponentAt(it) === header }
             flatGroups = (0 until pane.tabCount).any { pane.getComponentAt(it) == null }
@@ -456,18 +490,19 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
             else require(pane.selectedIndex == index) { "Model context probe requires the exact tab already selected" }
             // Selecting a tab synchronously invokes application ChangeListeners. They may
             // close, replace or reorder tabs before this assignment returns.
-            verifySelection(identity, requireSelected = false)
-            verifySelection(identity.take(stepIndex + 1))
+            verifySelection(owner, identity, requireSelected = false)
+            verifySelection(owner, identity.take(stepIndex + 1))
             val confirmedIndex = (0 until pane.tabCount).single { pane.getTabComponentAt(it) === header }
             names += pane.getTitleAt(confirmedIndex)
         }
         // Selecting cached identities avoids cycling through other tabs and resetting Burp's pooled response editor.
-        verifySelection(identity)
-        return Selected(RepeaterTab(tabId, names.last(), if (flatGroups) null else names.dropLast(1), "request"), identity.last().content, identity)
+        verifySelection(owner, identity)
+        return Selected(RepeaterTab(tabId, names.last(), if (flatGroups) null else names.dropLast(1), "request"),
+            identity.last().content, owner, identity)
     }
 
     private fun snapshot(selected: Selected): RepeaterSnapshot {
-        verifySelection(selected.identity)
+        verifySelection(selected.owner, selected.identity)
         val labels = components(selected.content).filterIsInstance<JLabel>()
             .filter { visibleWithin(it, selected.content) && it.text?.startsWith("Target: ") == true }.toList()
         require(labels.size == 1) { "Cannot uniquely read the HTTP target for this Repeater tab." }
@@ -486,6 +521,7 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
         val secure = target.scheme == "https"
         val port = target.port.takeIf { it >= 0 } ?: if (secure) 443 else 80
         val fingerprint = requestFingerprint(target.host, port, secure, request)
+        verifySelection(selected.owner, selected.identity)
         return RepeaterSnapshot(selected.description.tabId, selected.description.name,
             selected.description.groupPath, target.host, port, secure, request, response, fingerprint)
     }

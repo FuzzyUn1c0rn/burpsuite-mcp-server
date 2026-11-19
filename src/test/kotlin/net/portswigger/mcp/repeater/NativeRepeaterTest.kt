@@ -470,6 +470,47 @@ class NativeRepeaterTest {
     }
 
     @Test
+    fun `intact pane moved under Proxy cannot read or edit a cached Repeater ID`() = runBlocking {
+        val f = Fixture()
+        val editor = f.add("target")
+        val before = f.native.read(f.native.tabs().single().tabId)
+        SwingUtilities.invokeAndWait {
+            (f.suite.getComponentAt(0) as JPanel).add(f.tabs)
+            assertEquals(1, f.suite.selectedIndex)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { f.native.read(before.tabId) }
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking {
+                f.native.investigateEdit(before.tabId, before.fingerprint, before.request.replace("/one", "/changed"))
+            }
+        }
+        assertEquals(before.request, editor.text)
+        assertEquals(1, f.suite.selectedIndex)
+        assertTrue(f.native.tabs().isEmpty())
+    }
+
+    @Test
+    fun `rename and reorder preserve IDs within the original Repeater page`() = runBlocking {
+        val f = Fixture()
+        f.add("target")
+        f.add("neighbor", "/other")
+        val original = f.native.tabs().first()
+        SwingUtilities.invokeAndWait {
+            val page = f.tabs.getComponentAt(0)
+            val header = f.tabs.getTabComponentAt(0)
+            f.tabs.removeTabAt(0)
+            f.tabs.addTab("renamed", page)
+            f.tabs.setTabComponentAt(1, header)
+        }
+        val after = f.native.tabs().last()
+        assertEquals(original.tabId, after.tabId)
+        assertEquals("renamed", after.name)
+        assertTrue(f.native.read(after.tabId).request.startsWith("GET /one "))
+    }
+
+    @Test
     fun `a retained header cannot transfer an old tab ID to identical replacement content`() = runBlocking {
         for (relistBeforeEdit in listOf(false, true)) {
             val f = Fixture()
