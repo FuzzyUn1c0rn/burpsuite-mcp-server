@@ -127,14 +127,19 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
             val response = visibleResponse()
             val document = response?.document
             val sampled = displayedDraftResponse(document, limit)
+            val busyState = when (cancel?.isEnabled) {
+                true -> "busy"
+                false -> "idle"
+                null -> "unverified"
+            }
             val responseStillOwned = response != null && visibleResponse() === response &&
                 response.document === document && visibleWithin(response, responseOwner) &&
                 visibleWithin(responseOwner, selected.content)
-            verifyDraftReadView()
             val display = if (responseStillOwned) sampled else DraftDisplayedResponse("unavailable")
-            DraftUiState(selected.description, target.host, target.port.takeIf { it >= 0 }
-                ?: if (target.scheme == "https") 443 else 80, target.scheme == "https",
-                when (cancel?.isEnabled) { true -> "busy"; false -> "idle"; null -> "unverified" }, display)
+            val snapshot = DraftUiState(selected.description, target.host, target.port.takeIf { it >= 0 }
+                ?: if (target.scheme == "https") 443 else 80, target.scheme == "https", busyState, display)
+            verifyDraftReadView()
+            snapshot
         }, captureProfileMenuInvoker = { invoker ->
             check(SwingUtilities.isEventDispatchThread())
             val tabValid = try { verifySelection(selected.owner, selected.identity); true } catch (_: Exception) { false }

@@ -109,6 +109,33 @@ class NativeRepeaterTest {
     }
 
     @Test
+    fun `response owner reparented by busy state getter invalidates the draft read`() = runBlocking {
+        val fixture = NullHexFixture().apply { prepare() }
+        val target = fixture.f.native.modelContextTarget(fixture.id, activate = true)
+        SwingUtilities.invokeAndWait {
+            val detached = JPanel()
+            var moveOnRead = false
+            val cancel = object : JButton("Cancel") {
+                override fun isEnabled(): Boolean {
+                    if (moveOnRead) {
+                        moveOnRead = false
+                        detached.add(fixture.responseRegion)
+                    }
+                    return super.isEnabled()
+                }
+            }
+            fixture.panel.remove(fixture.panel.components.filterIsInstance<JButton>().single { it.text == "Cancel" })
+            fixture.panel.add(cancel)
+            fixture.responseRegion.add(JTextArea("Detached response").apply { isEditable = false })
+            moveOnRead = true
+
+            val read = runCatching { checkNotNull(target.readDraftUi)(4000) }
+            assertSame(detached, fixture.responseRegion.parent)
+            assertEquals("UNSUPPORTED_LAYOUT", (read.exceptionOrNull() as? DraftFailure)?.code)
+        }
+    }
+
+    @Test
     fun `null-page Hex binds only the pre-captured unique Request table without selecting views`() = runBlocking {
         val fixture = NullHexFixture().apply { prepare() }
         val target = fixture.f.native.modelContextTarget(fixture.id)
