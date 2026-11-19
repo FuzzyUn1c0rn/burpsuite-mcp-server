@@ -1,5 +1,6 @@
 package net.portswigger.mcp.repeater
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -227,9 +228,15 @@ internal class NativeRepeater(private val suiteFrame: () -> Component) {
             require(oldProtocol == newProtocol) { "Request-line protocol changes are outside this probe" }
             verifySelection(selected.owner, selected.identity)
             checkM0RepeaterAccess(allowed)
-            editors.single().text = request
-            check(allowed()) { "Repeater data access changed; draft mutation may have occurred." }
-            val after = snapshot(selected)
+            val after = try {
+                editors.single().text = request
+                checkM0RepeaterAccess(allowed)
+                snapshot(selected)
+            } catch (canceled: CancellationException) {
+                throw canceled
+            } catch (_: Exception) {
+                error("UPDATE_UNCONFIRMED: draft mutation may have occurred. Check the current draft before editing again.")
+            }
             check(before.targetHostname == after.targetHostname && before.targetPort == after.targetPort &&
                 before.usesHttps == after.usesHttps) { "UPDATE_UNCONFIRMED: destination changed; mutation may have occurred" }
             after

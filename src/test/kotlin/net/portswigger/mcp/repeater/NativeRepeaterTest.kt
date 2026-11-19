@@ -5,6 +5,8 @@ import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import java.awt.BorderLayout
 import javax.swing.*
+import javax.swing.event.DocumentEvent
+import javax.swing.event.DocumentListener
 
 class NativeRepeaterTest {
     private class NullHexFixture {
@@ -467,6 +469,31 @@ class NativeRepeaterTest {
         assertTrue(selected.request.startsWith("GET /two "))
         assertEquals(0, f.sends)
         assertEquals(1, f.tabs.selectedIndex)
+    }
+
+    @Test
+    fun `pane moved during widget setter reports possible mutation without confirming it`() = runBlocking {
+        val f = Fixture()
+        val editor = f.add("target")
+        val before = f.native.read(f.native.tabs().single().tabId)
+        val replacement = before.request.replace("/one", "/changed")
+        val proxy = f.suite.getComponentAt(0) as JPanel
+        SwingUtilities.invokeAndWait {
+            editor.document.addDocumentListener(object : DocumentListener {
+                override fun insertUpdate(event: DocumentEvent) = Unit
+                override fun changedUpdate(event: DocumentEvent) = Unit
+                override fun removeUpdate(event: DocumentEvent) {
+                    proxy.add(f.tabs)
+                }
+            })
+        }
+
+        val failure = runCatching {
+            f.native.investigateEdit(before.tabId, before.fingerprint, replacement)
+        }.exceptionOrNull()
+        assertTrue(failure?.message.orEmpty().startsWith("UPDATE_UNCONFIRMED: draft mutation may have occurred"))
+        assertSame(proxy, f.tabs.parent)
+        assertEquals(replacement, editor.text)
     }
 
     @Test
